@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+review_shots/
+audit_shots/
+*.spec.bak
+tb_test.png
+v2_main.png
+w2.png
