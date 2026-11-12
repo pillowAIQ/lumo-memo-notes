@@ -290,7 +290,11 @@ class Controller(QObject):
         cat_ids = None
         if cat_name:
             cat_ids = [db.find_or_create_category(cat_name)]
-        self.win.add_memo_text(text, cat_ids)
+        if text.strip():
+            self.win.add_memo_text(text, cat_ids)
+        elif cat_name:
+            # 仅创建分类：备忘录为空时 add_memo_text 不会触发刷新
+            self.win.reload()
 
     def show_main(self) -> None:
         self.win.show()

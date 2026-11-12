@@ -854,7 +854,8 @@ class MainWindow(QMainWindow):
         except sqlite3.IntegrityError:
             QMessageBox.warning(self, "新建分类", "同名分类已存在")
             return
-        except ValueError:
+        except ValueError as e:
+            QMessageBox.warning(self, "新建分类", str(e))
             return
         self.reload()
 
@@ -873,15 +874,16 @@ class MainWindow(QMainWindow):
         return [m for m in memos if visible(m)]
 
     def visible_memos(self) -> list[Memo]:
-        """桌面挂件用：非回收站、折叠分类隐私过滤后的全部备忘录（不受侧边栏选中影响）。"""
-        self._refresh_category_data()
-        collapsed = {c.id for c in self._categories if c.collapsed}
-        out = []
-        for m in db.list_memos():
-            cats = self._memo_cats.get(m.id, set())
-            if not cats or any(c not in collapsed for c in cats):
-                out.append(m)
-        return out
+        """桌面挂件用：非回收站、折叠分类隐私过滤后的全部备忘录（不受侧边栏选中/回收站浏览影响）。"""
+        cats = {c.id: c for c in db.list_categories()}
+        collapsed = {c.id for c in cats.values() if c.collapsed}
+        cat_map = db.memo_category_map()
+        return [
+            m
+            for m in db.list_memos()
+            if not cat_map.get(m.id)
+            or any(c not in collapsed for c in cat_map.get(m.id))
+        ]
 
     def assign_categories(self, memo_id: int) -> None:
         dlg = CategoryPickerDialog(
@@ -938,6 +940,7 @@ class MainWindow(QMainWindow):
         memos = db.list_memos(trash=self.trash_mode, query=query)
         if not self.trash_mode:
             memos = self._filter_by_category(memos)
+        self._memos = memos
 
         sb = self.list.verticalScrollBar()
         pos = sb.value()
