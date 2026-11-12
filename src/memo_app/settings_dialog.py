@@ -28,7 +28,7 @@ class SettingsDialog(QDialog):
         row.setSpacing(8)
         row.addWidget(QLabel("呼出快捷键"))
         self.hotkey_edit = QLineEdit(controller.hotkey_display())
-        self.hotkey_edit.setReadOnly(True)
+        self.hotkey_edit.setPlaceholderText("点击录制，或手动输入如 Ctrl+Shift+K")
         row.addWidget(self.hotkey_edit, 1)
         self.record_btn = QPushButton("点击录制")
         self.record_btn.setObjectName("recordBtn")
@@ -36,7 +36,10 @@ class SettingsDialog(QDialog):
         row.addWidget(self.record_btn)
         lay.addLayout(row)
 
-        self.tip = QLabel("录制时按下你想要的组合键（需含 Ctrl/Shift/Alt/Win + 一个键）")
+        self.tip = QLabel(
+            "点击录制后按下组合键（需含 Ctrl/Shift/Alt/Win + 一个键）；"
+            "也可直接在输入框手动输入，如 Ctrl+P"
+        )
         self.tip.setStyleSheet("color: #8b877b; font-size: 11px;")
         self.tip.setWordWrap(True)
         lay.addWidget(self.tip)
@@ -50,6 +53,8 @@ class SettingsDialog(QDialog):
         lay.addWidget(buttons)
 
         self.record_btn.toggled.connect(self._on_record_toggled)
+        # 手动输入时自动退出录制，避免 _poll 覆盖正在输入的内容
+        self.hotkey_edit.textEdited.connect(self._on_manual_edit)
         self._timer = QTimer(self)
         self._timer.setInterval(120)
         self._timer.timeout.connect(self._poll)
@@ -63,11 +68,19 @@ class SettingsDialog(QDialog):
             self._timer.start()
         else:
             self._timer.stop()
+            self.hotkey_edit.setPlaceholderText("点击录制，或手动输入如 Ctrl+Shift+K")
+
+    def _on_manual_edit(self, _text: str) -> None:
+        if self._recording:
+            self.record_btn.setChecked(False)
 
     def _poll(self) -> None:
         if not self._recording:
             return
-        desc = self.ctl.describe_pressed()
+        try:
+            desc = self.ctl.describe_pressed()
+        except Exception:
+            return
         if desc:
             self.hotkey_edit.setText(desc)
             self.record_btn.setChecked(False)

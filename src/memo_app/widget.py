@@ -109,7 +109,7 @@ class TodoWidget(QWidget):
                 border: 1.5px solid rgba(255, 255, 255, 110);
                 border-radius: 9px;
                 background: transparent; color: transparent;
-                font-size: 10px; font-weight: bold;
+                font-size: 10px; font-weight: bold; padding: 0;
             }
             QPushButton#widgetDone:hover { border-color: #4ecb8d; color: #4ecb8d; }
             QPushButton#widgetDone[done="true"] {
@@ -120,7 +120,7 @@ class TodoWidget(QWidget):
         self._build()
         self._press_pos = None
         self._dragging = False
-        # 由 Controller 注入：返回经过分类折叠隐私过滤的备忘录列表
+        # 由 Controller 注入：返回非回收站的全部备忘录
         self._memo_provider = None
         # 分组展开状态（会话内记忆，重启默认全部折叠 = 隐私默认）
         self._expanded: set[str] = set()
@@ -196,16 +196,12 @@ class TodoWidget(QWidget):
         todos = [m for m in provider() if not m.is_done]
         self.count_label.setText(f"{len(todos)} 项" if todos else "")
 
-        # 按分类分组：未分类("0")排最后；优先归入未折叠的分类
+        # 按分类分组：未分类("0")排最后
         cats = {c.id: c for c in db.list_categories()}
-        collapsed_ids = {c.id for c in cats.values() if c.collapsed}
         cat_map = db.memo_category_map()
 
         def group_key(m: Memo) -> str:
             cids = cat_map.get(m.id, set())
-            for cid in sorted(cids):
-                if cid not in collapsed_ids:
-                    return str(cid)
             return str(sorted(cids)[0]) if cids else "0"
 
         groups: dict[str, list[Memo]] = {}

@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -118,7 +118,6 @@ QWidget#catRow { border-radius: 8px; }
 QWidget#catRow:hover { background: #e7e4d9; }
 QWidget#catRow[selected="true"] { background: #fbeee5; }
 QLabel#catName { font-size: 13px; color: #3a362e; }
-QLabel#catArrow { font-size: 10px; color: #7d786b; }
 QPushButton#catDel {
     border: none; background: transparent; color: #8f8a80;
     font-size: 13px; padding: 0 4px;
@@ -153,11 +152,6 @@ QPushButton#recordBtn:checked {
     background: #d96c3f; border-color: #d96c3f; color: #ffffff;
 }
 QPushButton#recordBtn:checked:hover { background: #c85f33; }
-QPushButton#tagBtn {
-    border: 1px solid #d8d3c6; border-radius: 10px;
-    padding: 4px 10px; background: #ffffff; color: #5c574c;
-}
-QPushButton#tagBtn:hover { border-color: #d96c3f; }
 
 /* 备忘录卡片 */
 QWidget#memoItem {
@@ -192,6 +186,22 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 QLabel#emptyLabel { color: #8f8a80; font-size: 14px; border: none; background: transparent; }
 QLabel#statusLabel { color: #8f8a80; font-size: 11px; border: none; background: transparent; }
+
+/* 回收站横幅 */
+QWidget#trashBar {
+    background: #faf5e9; border: 1px solid #e9e1cd; border-radius: 10px;
+}
+QPushButton#trashBack {
+    border: none; background: transparent; color: #5c574c;
+    font-weight: 600; padding: 4px 8px;
+}
+QPushButton#trashBack:hover { color: #d96c3f; }
+QLabel#trashTitle { color: #7d786b; font-size: 12px; border: none; background: transparent; }
+QPushButton#trashPurge {
+    border: 1px solid #e5c8bc; border-radius: 8px; background: #ffffff;
+    color: #b3503f; padding: 4px 14px;
+}
+QPushButton#trashPurge:hover { background: #fdf1ec; border-color: #d98d7d; color: #d64541; }
 """.replace("@CHECK@", _CHECK_PNG)
 
 
@@ -343,13 +353,12 @@ class NameDialog(QDialog):
 
 
 class CategoryRow(QWidget):
-    """侧边栏分类行：点击名称选中，点击箭头折叠，悬停出现删除。"""
+    """侧边栏分类行：点击选中，悬停出现删除。"""
 
     activated = Signal(int)          # cat_id，0 = 全部
-    collapse_toggled = Signal(int)
     delete_requested = Signal(int)
 
-    def __init__(self, cat_id: int, name: str, collapsed: bool, all_row: bool = False):
+    def __init__(self, cat_id: int, name: str):
         super().__init__()
         self.cat_id = cat_id
         self.setObjectName("catRow")
@@ -358,21 +367,8 @@ class CategoryRow(QWidget):
         self.setFixedHeight(30)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 6, 0)
+        lay.setContentsMargins(10, 0, 6, 0)
         lay.setSpacing(4)
-
-        if all_row:
-            self.arrow = QLabel("")
-        else:
-            self.arrow = QPushButton("▸" if collapsed else "▾")
-            self.arrow.setObjectName("catArrow")
-            self.arrow.setFixedSize(18, 18)
-            self.arrow.setFlat(True)
-            self.arrow.setStyleSheet(
-                "QPushButton { border:none; background:transparent; }"
-            )
-            self.arrow.clicked.connect(lambda: self.collapse_toggled.emit(cat_id))
-        lay.addWidget(self.arrow, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.name = QLabel(name)
         self.name.setObjectName("catName")
@@ -391,11 +387,6 @@ class CategoryRow(QWidget):
         self.style().unpolish(self)
         self.style().polish(self)
 
-    def set_collapsed(self, collapsed: bool) -> None:
-        if not isinstance(self.arrow, QPushButton):
-            return
-        self.arrow.setText("▸" if collapsed else "▾")
-
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
             self.activated.emit(self.cat_id)
@@ -411,9 +402,10 @@ class CategoryRow(QWidget):
 
 
 class MemoItemWidget(QWidget):
-    """单条备忘录的展示控件（固定行高，单行内容，卡片样式）。"""
+    """单条备忘录的展示控件（卡片样式，内容自动换行、高度自适应）。"""
 
-    HEIGHT = 54
+    HEIGHT = 54  # 最小高度（单行）
+    height_changed = Signal(int)
 
     def __init__(self, memo: Memo, win: "MainWindow"):
         super().__init__()
@@ -427,9 +419,10 @@ class MemoItemWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._build()
         self._apply_state()
-        self.setFixedHeight(self.HEIGHT)
+        self.setMinimumHeight(self.HEIGHT)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
+        QTimer.singleShot(0, self, self._update_height)
 
     # ---------- 构建 ----------
 
@@ -444,7 +437,7 @@ class MemoItemWidget(QWidget):
         self.done_btn.setFlat(True)
         self.done_btn.setStyleSheet(
             "QPushButton { border: 1.5px solid #d8d4c8; border-radius: 11px;"
-            " background: transparent; }"
+            " padding: 0; background: transparent; }"
             "QPushButton:hover { border-color: #2f9e63; }"
             "QPushButton[done=\"true\"] { background: #2f9e63;"
             " border-color: #2f9e63; color: white; font-weight: bold; font-size: 12px; }"
@@ -461,7 +454,8 @@ class MemoItemWidget(QWidget):
         pl.setContentsMargins(0, 0, 0, 0)
         self.content_label = QLabel()
         self.content_label.setObjectName("memoContent")
-        self.content_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.content_label.setWordWrap(True)
+        self.content_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         pl.addWidget(self.content_label)
         self.host_stack.addWidget(page)
         self.edit = QLineEdit()
@@ -474,16 +468,15 @@ class MemoItemWidget(QWidget):
         self.host_stack.addWidget(self.edit)
         lay.addWidget(self.host_stack, 1)
 
-        # 删除按钮：悬停才显示（与侧栏分类删除一致，减少视觉噪音）
+        # 删除按钮：常显暖灰，悬停变红
         self.del_btn = QPushButton("×")
         self.del_btn.setFixedSize(22, 22)
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.del_btn.setFlat(True)
         self.del_btn.setStyleSheet(
-            "QPushButton { border: none; color: #b5b0a2; font-size: 15px; }"
+            "QPushButton { border: none; padding: 0; color: #8f8a80; font-size: 15px; }"
             "QPushButton:hover { color: #d64541; }"
         )
-        self.del_btn.setVisible(False)
         self.del_btn.clicked.connect(lambda: self.win.delete_memo(self.memo.id))
         lay.addWidget(self.del_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -493,7 +486,7 @@ class MemoItemWidget(QWidget):
         self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.restore_btn.setFlat(True)
         self.restore_btn.setStyleSheet(
-            "QPushButton { border: none; color: #7d786b; font-size: 14px; }"
+            "QPushButton { border: none; padding: 0; color: #7d786b; font-size: 14px; }"
             "QPushButton:hover { color: #2f9e63; }"
         )
         self.restore_btn.setVisible(False)
@@ -540,7 +533,7 @@ class MemoItemWidget(QWidget):
         pal.setColor(QPalette.ColorRole.Text, QColor(C_TEXT_DONE if done else C_TEXT))
         self.content_label.setPalette(pal)
 
-        self.content_label.setText(self._elided(self.full_text))
+        self.content_label.setText(self.full_text)
         self.content_label.setToolTip(self.full_text)
         self.pin_label.setVisible(self.memo.is_pinned)
         self.time_label.setText(rel_time(self.memo.updated_at))
@@ -553,30 +546,32 @@ class MemoItemWidget(QWidget):
 
         trash = self.win.trash_mode
         self.done_btn.setVisible(not trash)
-        self.del_btn.setVisible(False)  # 由 enterEvent 控制
+        self.del_btn.setVisible(not trash)
         self.restore_btn.setVisible(trash)
+        QTimer.singleShot(0, self, self._update_height)
 
-    def _elided(self, text: str) -> str:
-        w = self.content_label.width()
-        if w <= 0:
-            return text
-        return self.content_label.fontMetrics().elidedText(
-            text, Qt.TextElideMode.ElideRight, w
+    def _update_height(self) -> None:
+        """按换行后的文本高度调整卡片高度（长备忘录完整显示）。"""
+        if self._editing:
+            return
+        label_w = self.content_label.width()
+        if label_w <= 4:
+            return
+        br = self.content_label.fontMetrics().boundingRect(
+            QRect(0, 0, label_w, 0),
+            Qt.TextFlag.TextWordWrap,
+            self.full_text,
         )
+        # 上下布局内边距各 7px；至少保留单行最小高度
+        h = max(self.HEIGHT, br.height() + 14)
+        if abs(h - self.height()) > 1:
+            self.setFixedHeight(h)
+            self.height_changed.emit(h)
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
-        if self.content_label.isVisible():
-            self.content_label.setText(self._elided(self.full_text))
-
-    def enterEvent(self, e):  # noqa: N802
-        if not self.win.trash_mode and not self._editing:
-            self.del_btn.setVisible(True)
-        super().enterEvent(e)
-
-    def leaveEvent(self, e):  # noqa: N802
-        self.del_btn.setVisible(False)
-        super().leaveEvent(e)
+        # 宽度变化会改变换行行数，延迟到布局稳定后重算高度
+        QTimer.singleShot(0, self, self._update_height)
 
     # ---------- 编辑 ----------
 
@@ -599,10 +594,11 @@ class MemoItemWidget(QWidget):
         self._editing = False
         text = self.edit.text().strip()
         self.host_stack.setCurrentWidget(self.host_stack.widget(0))
+        QTimer.singleShot(0, self, self._update_height)
         if save and text and text != self.full_text:
             self.win.edit_memo(self.memo.id, text)
         else:
-            self.content_label.setText(self._elided(self.full_text))
+            self.content_label.setText(self.full_text)
 
     def eventFilter(self, obj, e):  # noqa: N802
         if (
@@ -650,7 +646,6 @@ class MainWindow(QMainWindow):
         self.tray_available = False
         self.controller = None
         self.selected_category: int | None = None
-        self.pending_cats: set[int] = set()
         self._memos: list[Memo] = []
         self._categories: list[Category] = []
         self._memo_cats: dict[int, set[int]] = {}
@@ -728,24 +723,36 @@ class MainWindow(QMainWindow):
         self.search_edit.setVisible(False)
         maincol.addWidget(self.search_edit)
 
-        input_row = QHBoxLayout()
-        input_row.setSpacing(8)
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("mainInput")
         self.input_edit.setPlaceholderText("想记点什么？回车保存 · 双击条目可编辑")
-        self.tag_btn = QPushButton("🏷")
-        self.tag_btn.setObjectName("tagBtn")
-        self.tag_btn.setFixedWidth(46)
-        self.tag_btn.setToolTip("选择本条备忘录所属分类")
-        self.tag_btn.clicked.connect(self._pick_pending_cats)
-        input_row.addWidget(self.input_edit, 1)
-        input_row.addWidget(self.tag_btn)
-        maincol.addLayout(input_row)
+        maincol.addWidget(self.input_edit)
+
+        # 回收站横幅：仅回收站模式显示（返回 + 计数 + 清空）
+        self.trash_bar = QWidget()
+        self.trash_bar.setObjectName("trashBar")
+        self.trash_bar.setVisible(False)
+        tbl = QHBoxLayout(self.trash_bar)
+        tbl.setContentsMargins(12, 5, 10, 5)
+        tbl.setSpacing(6)
+        back_btn = QPushButton("← 返回")
+        back_btn.setObjectName("trashBack")
+        back_btn.clicked.connect(lambda: self._set_trash(False))
+        tbl.addWidget(back_btn)
+        self.trash_title = QLabel("")
+        self.trash_title.setObjectName("trashTitle")
+        tbl.addWidget(self.trash_title)
+        tbl.addStretch(1)
+        self.trash_purge_btn = QPushButton("清空回收站")
+        self.trash_purge_btn.setObjectName("trashPurge")
+        self.trash_purge_btn.clicked.connect(self._on_purge_all)
+        tbl.addWidget(self.trash_purge_btn)
+        maincol.addWidget(self.trash_bar)
 
         self.stack = QStackedWidget()
         self.list = QListWidget()
         self.list.setSpacing(8)
-        self.list.setUniformItemSizes(True)
+        self.list.setUniformItemSizes(False)
         self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.list.setFrameShape(QListWidget.Shape.NoFrame)
@@ -771,12 +778,8 @@ class MainWindow(QMainWindow):
         bottom = QHBoxLayout()
         self.status_label = QLabel()
         self.status_label.setObjectName("statusLabel")
-        self.purge_btn = QPushButton("清空回收站")
-        self.purge_btn.setObjectName("pillBtn")
-        self.purge_btn.setVisible(False)
         bottom.addWidget(self.status_label)
         bottom.addStretch(1)
-        bottom.addWidget(self.purge_btn)
         maincol.addLayout(bottom)
 
         body.addLayout(maincol, 1)
@@ -787,7 +790,6 @@ class MainWindow(QMainWindow):
         # 信号
         self.input_edit.returnPressed.connect(self._on_add)
         self.search_edit.textChanged.connect(lambda _t: self.reload())
-        self.purge_btn.clicked.connect(self._on_purge_all)
         self.list.itemSelectionChanged.connect(self._sync_selection)
 
         sc = QShortcut(QKeySequence.StandardKey.Delete, self.list)
@@ -810,16 +812,15 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
 
-        all_row = CategoryRow(0, "全部", False, all_row=True)
+        all_row = CategoryRow(0, "全部")
         all_row.set_selected(self.selected_category is None)
         all_row.activated.connect(self._on_cat_select)
         self.side_rows.addWidget(all_row)
 
         for cat in self._categories:
-            row = CategoryRow(cat.id, cat.name, cat.collapsed)
+            row = CategoryRow(cat.id, cat.name)
             row.set_selected(self.selected_category == cat.id)
             row.activated.connect(self._on_cat_select)
-            row.collapse_toggled.connect(self._on_cat_collapse)
             row.delete_requested.connect(self._on_cat_delete)
             self.side_rows.addWidget(row)
 
@@ -827,18 +828,12 @@ class MainWindow(QMainWindow):
         self.selected_category = None if cat_id == 0 else cat_id
         self.reload()
 
-    def _on_cat_collapse(self, cat_id: int) -> None:
-        cat = next((c for c in self._categories if c.id == cat_id), None)
-        if cat is None:
-            return
-        db.set_category_collapsed(cat_id, not cat.collapsed)
-        self.reload()
-
     def _on_cat_delete(self, cat_id: int) -> None:
         cat = next((c for c in self._categories if c.id == cat_id), None)
         name = cat.name if cat else "该分类"
         if QMessageBox.question(
-            self, "删除分类", f"确定删除分类「{name}」吗？备忘录本身不会被删除。"
+            self, "删除分类",
+            f"确定删除分类「{name}」吗？其中的备忘录将移入回收站。",
         ) == QMessageBox.StandardButton.Yes:
             db.delete_category(cat_id)
             if self.selected_category == cat_id:
@@ -865,25 +860,11 @@ class MainWindow(QMainWindow):
                 m for m in memos
                 if self.selected_category in self._memo_cats.get(m.id, set())
             ]
-        collapsed = {c.id for c in self._categories if c.collapsed}
-
-        def visible(m: Memo) -> bool:
-            cats = self._memo_cats.get(m.id, set())
-            return not cats or any(c not in collapsed for c in cats)
-
-        return [m for m in memos if visible(m)]
+        return memos
 
     def visible_memos(self) -> list[Memo]:
-        """桌面挂件用：非回收站、折叠分类隐私过滤后的全部备忘录（不受侧边栏选中/回收站浏览影响）。"""
-        cats = {c.id: c for c in db.list_categories()}
-        collapsed = {c.id for c in cats.values() if c.collapsed}
-        cat_map = db.memo_category_map()
-        return [
-            m
-            for m in db.list_memos()
-            if not cat_map.get(m.id)
-            or any(c not in collapsed for c in cat_map.get(m.id))
-        ]
+        """桌面挂件用：非回收站的全部备忘录（不受侧边栏选中/回收站浏览影响；分组折叠由挂件自身控制）。"""
+        return db.list_memos()
 
     def assign_categories(self, memo_id: int) -> None:
         dlg = CategoryPickerDialog(
@@ -911,25 +892,16 @@ class MainWindow(QMainWindow):
         self.trash_mode = on
         self.trash_action.setChecked(on)
         self.input_edit.setVisible(not on)
-        self.tag_btn.setVisible(not on)
         self.search_edit.setPlaceholderText("搜索回收站…" if on else "搜索备忘录…")
         if on:
             self.search_edit.setVisible(False)
             self.search_action.setChecked(False)
-        self.purge_btn.setVisible(on)
+        self.trash_bar.setVisible(on)
         self.reload()
 
     def _open_settings(self) -> None:
         if self.controller is not None:
             SettingsDialog(self.controller, self).exec()
-
-    def _pick_pending_cats(self) -> None:
-        dlg = CategoryPickerDialog(db.list_categories(), self.pending_cats, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.pending_cats = dlg.selected_ids()
-            self.tag_btn.setText(
-                f"🏷 {len(self.pending_cats)}" if self.pending_cats else "🏷"
-            )
 
     # ---------- 数据 ----------
 
@@ -947,11 +919,17 @@ class MainWindow(QMainWindow):
         self.list.clear()
         for memo in memos:
             w = MemoItemWidget(memo, self)
+            w.height_changed.connect(
+                lambda h, mid=memo.id: self._sync_item_height(mid, h)
+            )
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, memo.id)
-            item.setSizeHint(QSize(w.sizeHint().width(), MemoItemWidget.HEIGHT))
+            # 宽度不指定（0=跟随视口）；若用文本理想宽度，窄窗口不换行且出横向滚动条
+            item.setSizeHint(QSize(0, MemoItemWidget.HEIGHT))
             self.list.addItem(item)
             self.list.setItemWidget(item, w)
+        # 首帧布局完成后按实际换行高度校准各条目尺寸
+        QTimer.singleShot(0, self._update_item_heights)
         QTimer.singleShot(0, lambda: sb.setValue(min(pos, sb.maximum())))
         self._sync_selection()
 
@@ -970,6 +948,22 @@ class MainWindow(QMainWindow):
         self._update_status(len(memos))
         self.memos_changed.emit()
 
+    def _sync_item_height(self, memo_id: int, h: int) -> None:
+        """卡片高度变化时同步 QListWidgetItem 的尺寸提示。"""
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == memo_id:
+                sz = it.sizeHint()
+                sz.setHeight(h)
+                it.setSizeHint(sz)
+                break
+
+    def _update_item_heights(self) -> None:
+        for i in range(self.list.count()):
+            w = self.list.itemWidget(self.list.item(i))
+            if isinstance(w, MemoItemWidget):
+                w._update_height()
+
     def _sync_selection(self) -> None:
         current = self.list.currentItem()
         for i in range(self.list.count()):
@@ -981,12 +975,9 @@ class MainWindow(QMainWindow):
     def _update_status(self, shown: int) -> None:
         if self.trash_mode:
             self.status_label.setText(f"回收站 {shown} 条")
+            self.trash_title.setText(f"回收站 · {shown} 条备忘录")
         else:
-            done = sum(1 for m in self._memos if m.is_done) if self._memos else 0
-            text = f"共 {shown} 条"
-            if done:
-                text += f" · {done} 条已完成"
-            self.status_label.setText(text)
+            self.status_label.setText(f"共 {shown} 条")
 
     # ---------- 操作 ----------
 
@@ -1007,11 +998,13 @@ class MainWindow(QMainWindow):
         return mid
 
     def _on_add(self) -> None:
-        # 选中的分类 + 🏷 手动勾选的分类，合并后归入新备忘录
-        cats = set(self.pending_cats)
-        if self.selected_category is not None:
-            cats.add(self.selected_category)
-        mid = self.add_memo_text(self.input_edit.text(), list(cats) or None)
+        # 侧边栏选中的分类自动归入新备忘录
+        cats = (
+            [self.selected_category]
+            if self.selected_category is not None
+            else None
+        )
+        mid = self.add_memo_text(self.input_edit.text(), cats)
         if mid is not None:
             self.input_edit.clear()
             self.input_edit.setFocus()

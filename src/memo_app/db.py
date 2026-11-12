@@ -159,11 +159,25 @@ def toggle_pin(memo_id: int) -> None:
 
 
 def toggle_done(memo_id: int) -> None:
+    """切换完成状态：标记完成时同时移入回收站；已完成的取消完成标记。"""
+    now = now_iso()
     with db() as conn:
-        conn.execute(
-            "UPDATE memos SET is_done = 1 - is_done, updated_at = ? WHERE id = ?",
-            (now_iso(), memo_id),
-        )
+        row = conn.execute(
+            "SELECT is_done FROM memos WHERE id = ?", (memo_id,)
+        ).fetchone()
+        if row is None:
+            return
+        if row["is_done"]:
+            conn.execute(
+                "UPDATE memos SET is_done = 0, updated_at = ? WHERE id = ?",
+                (now, memo_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE memos SET is_done = 1, deleted_at = ?, updated_at = ? "
+                "WHERE id = ?",
+                (now, now, memo_id),
+            )
 
 
 def soft_delete(memo_id: int) -> None:
@@ -171,7 +185,8 @@ def soft_delete(memo_id: int) -> None:
 
 
 def restore(memo_id: int) -> None:
-    _touch(memo_id, deleted_at=None)
+    # 恢复即回到待办状态：已完成标记一并清除，避免完成条目留在主列表
+    _touch(memo_id, deleted_at=None, is_done=0)
 
 
 def purge(memo_id: int) -> None:
@@ -219,7 +234,15 @@ def create_category(name: str) -> int:
 
 
 def delete_category(cat_id: int) -> None:
+    """删除分类：其中的备忘录移入回收站（软删除），分类及关联一并删除。"""
+    now = now_iso()
     with db() as conn:
+        conn.execute(
+            "UPDATE memos SET deleted_at = ?, updated_at = ? "
+            "WHERE deleted_at IS NULL AND id IN "
+            "(SELECT memo_id FROM memo_categories WHERE category_id = ?)",
+            (now, now, cat_id),
+        )
         conn.execute("DELETE FROM memo_categories WHERE category_id = ?", (cat_id,))
         conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
 
