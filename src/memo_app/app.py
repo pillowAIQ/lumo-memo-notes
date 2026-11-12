@@ -153,11 +153,6 @@ QPushButton#recordBtn:checked {
     background: #d96c3f; border-color: #d96c3f; color: #ffffff;
 }
 QPushButton#recordBtn:checked:hover { background: #c85f33; }
-QPushButton#tagBtn {
-    border: 1px solid #d8d3c6; border-radius: 10px;
-    padding: 4px 10px; background: #ffffff; color: #5c574c;
-}
-QPushButton#tagBtn:hover { border-color: #d96c3f; }
 
 /* 备忘录卡片 */
 QWidget#memoItem {
@@ -640,7 +635,6 @@ class MainWindow(QMainWindow):
         self.tray_available = False
         self.controller = None
         self.selected_category: int | None = None
-        self.pending_cats: set[int] = set()
         self._memos: list[Memo] = []
         self._categories: list[Category] = []
         self._memo_cats: dict[int, set[int]] = {}
@@ -718,19 +712,10 @@ class MainWindow(QMainWindow):
         self.search_edit.setVisible(False)
         maincol.addWidget(self.search_edit)
 
-        input_row = QHBoxLayout()
-        input_row.setSpacing(8)
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("mainInput")
         self.input_edit.setPlaceholderText("想记点什么？回车保存 · 双击条目可编辑")
-        self.tag_btn = QPushButton("🏷")
-        self.tag_btn.setObjectName("tagBtn")
-        self.tag_btn.setFixedWidth(46)
-        self.tag_btn.setToolTip("选择本条备忘录所属分类")
-        self.tag_btn.clicked.connect(self._pick_pending_cats)
-        input_row.addWidget(self.input_edit, 1)
-        input_row.addWidget(self.tag_btn)
-        maincol.addLayout(input_row)
+        maincol.addWidget(self.input_edit)
 
         self.stack = QStackedWidget()
         self.list = QListWidget()
@@ -901,7 +886,6 @@ class MainWindow(QMainWindow):
         self.trash_mode = on
         self.trash_action.setChecked(on)
         self.input_edit.setVisible(not on)
-        self.tag_btn.setVisible(not on)
         self.search_edit.setPlaceholderText("搜索回收站…" if on else "搜索备忘录…")
         if on:
             self.search_edit.setVisible(False)
@@ -912,14 +896,6 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         if self.controller is not None:
             SettingsDialog(self.controller, self).exec()
-
-    def _pick_pending_cats(self) -> None:
-        dlg = CategoryPickerDialog(db.list_categories(), self.pending_cats, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.pending_cats = dlg.selected_ids()
-            self.tag_btn.setText(
-                f"🏷 {len(self.pending_cats)}" if self.pending_cats else "🏷"
-            )
 
     # ---------- 数据 ----------
 
@@ -997,11 +973,13 @@ class MainWindow(QMainWindow):
         return mid
 
     def _on_add(self) -> None:
-        # 选中的分类 + 🏷 手动勾选的分类，合并后归入新备忘录
-        cats = set(self.pending_cats)
-        if self.selected_category is not None:
-            cats.add(self.selected_category)
-        mid = self.add_memo_text(self.input_edit.text(), list(cats) or None)
+        # 侧边栏选中的分类自动归入新备忘录
+        cats = (
+            [self.selected_category]
+            if self.selected_category is not None
+            else None
+        )
+        mid = self.add_memo_text(self.input_edit.text(), cats)
         if mid is not None:
             self.input_edit.clear()
             self.input_edit.setFocus()
