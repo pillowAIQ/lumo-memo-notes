@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -402,9 +402,10 @@ class CategoryRow(QWidget):
 
 
 class MemoItemWidget(QWidget):
-    """单条备忘录的展示控件（固定行高，单行内容，卡片样式）。"""
+    """单条备忘录的展示控件（卡片样式，内容自动换行、高度自适应）。"""
 
-    HEIGHT = 54
+    HEIGHT = 54  # 最小高度（单行）
+    height_changed = Signal(int)
 
     def __init__(self, memo: Memo, win: "MainWindow"):
         super().__init__()
@@ -418,9 +419,10 @@ class MemoItemWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._build()
         self._apply_state()
-        self.setFixedHeight(self.HEIGHT)
+        self.setMinimumHeight(self.HEIGHT)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
+        QTimer.singleShot(0, self, self._update_height)
 
     # ---------- 构建 ----------
 
@@ -452,7 +454,8 @@ class MemoItemWidget(QWidget):
         pl.setContentsMargins(0, 0, 0, 0)
         self.content_label = QLabel()
         self.content_label.setObjectName("memoContent")
-        self.content_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.content_label.setWordWrap(True)
+        self.content_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         pl.addWidget(self.content_label)
         self.host_stack.addWidget(page)
         self.edit = QLineEdit()
@@ -530,7 +533,7 @@ class MemoItemWidget(QWidget):
         pal.setColor(QPalette.ColorRole.Text, QColor(C_TEXT_DONE if done else C_TEXT))
         self.content_label.setPalette(pal)
 
-        self.content_label.setText(self._elided(self.full_text))
+        self.content_label.setText(self.full_text)
         self.content_label.setToolTip(self.full_text)
         self.pin_label.setVisible(self.memo.is_pinned)
         self.time_label.setText(rel_time(self.memo.updated_at))
@@ -545,19 +548,30 @@ class MemoItemWidget(QWidget):
         self.done_btn.setVisible(not trash)
         self.del_btn.setVisible(not trash)
         self.restore_btn.setVisible(trash)
+        QTimer.singleShot(0, self, self._update_height)
 
-    def _elided(self, text: str) -> str:
-        w = self.content_label.width()
-        if w <= 0:
-            return text
-        return self.content_label.fontMetrics().elidedText(
-            text, Qt.TextElideMode.ElideRight, w
+    def _update_height(self) -> None:
+        """按换行后的文本高度调整卡片高度（长备忘录完整显示）。"""
+        if self._editing:
+            return
+        label_w = self.content_label.width()
+        if label_w <= 4:
+            return
+        br = self.content_label.fontMetrics().boundingRect(
+            QRect(0, 0, label_w, 0),
+            Qt.TextFlag.TextWordWrap,
+            self.full_text,
         )
+        # 上下布局内边距各 7px；至少保留单行最小高度
+        h = max(self.HEIGHT, br.height() + 14)
+        if abs(h - self.height()) > 1:
+            self.setFixedHeight(h)
+            self.height_changed.emit(h)
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
-        if self.content_label.isVisible():
-            self.content_label.setText(self._elided(self.full_text))
+        # 宽度变化会改变换行行数，延迟到布局稳定后重算高度
+        QTimer.singleShot(0, self, self._update_height)
 
     # ---------- 编辑 ----------
 
@@ -580,10 +594,11 @@ class MemoItemWidget(QWidget):
         self._editing = False
         text = self.edit.text().strip()
         self.host_stack.setCurrentWidget(self.host_stack.widget(0))
+        QTimer.singleShot(0, self, self._update_height)
         if save and text and text != self.full_text:
             self.win.edit_memo(self.memo.id, text)
         else:
-            self.content_label.setText(self._elided(self.full_text))
+            self.content_label.setText(self.full_text)
 
     def eventFilter(self, obj, e):  # noqa: N802
         if (
@@ -737,7 +752,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.list = QListWidget()
         self.list.setSpacing(8)
-        self.list.setUniformItemSizes(True)
+        self.list.setUniformItemSizes(False)
         self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.list.setFrameShape(QListWidget.Shape.NoFrame)
@@ -904,11 +919,17 @@ class MainWindow(QMainWindow):
         self.list.clear()
         for memo in memos:
             w = MemoItemWidget(memo, self)
+            w.height_changed.connect(
+                lambda h, mid=memo.id: self._sync_item_height(mid, h)
+            )
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, memo.id)
-            item.setSizeHint(QSize(w.sizeHint().width(), MemoItemWidget.HEIGHT))
+            # 宽度不指定（0=跟随视口）；若用文本理想宽度，窄窗口不换行且出横向滚动条
+            item.setSizeHint(QSize(0, MemoItemWidget.HEIGHT))
             self.list.addItem(item)
             self.list.setItemWidget(item, w)
+        # 首帧布局完成后按实际换行高度校准各条目尺寸
+        QTimer.singleShot(0, self._update_item_heights)
         QTimer.singleShot(0, lambda: sb.setValue(min(pos, sb.maximum())))
         self._sync_selection()
 
@@ -926,6 +947,22 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.stack.widget(1))
         self._update_status(len(memos))
         self.memos_changed.emit()
+
+    def _sync_item_height(self, memo_id: int, h: int) -> None:
+        """卡片高度变化时同步 QListWidgetItem 的尺寸提示。"""
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == memo_id:
+                sz = it.sizeHint()
+                sz.setHeight(h)
+                it.setSizeHint(sz)
+                break
+
+    def _update_item_heights(self) -> None:
+        for i in range(self.list.count()):
+            w = self.list.itemWidget(self.list.item(i))
+            if isinstance(w, MemoItemWidget):
+                w._update_height()
 
     def _sync_selection(self) -> None:
         current = self.list.currentItem()

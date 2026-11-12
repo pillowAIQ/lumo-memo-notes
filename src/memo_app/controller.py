@@ -67,9 +67,9 @@ def _resolve_key(tok: str):
     """把快捷键字符串的最后一段解析为 ('vk', code) 或 ('name', attr)。"""
     if len(tok) == 1:
         c = tok
-        if c.isalpha():
+        if c.isascii() and c.isalpha():
             return ("vk", ord(c.upper()))
-        if c.isdigit():
+        if c.isascii() and c.isdigit():
             return ("vk", ord(c))
         if c == " ":
             return ("name", "space")
@@ -120,6 +120,65 @@ def format_spec(spec) -> str:
     return "+".join([_MOD_DISPLAY[m] for m in _MOD_ORDER if m in mods] + [key_desc])
 
 
+# ---- 全局热键：GetAsyncKeyState 实时状态查询 ----
+# 不依赖 press/release 事件配对，免疫丢事件导致的粘滞键误触发。
+
+_VK_SHIFT, _VK_CTRL, _VK_ALT = 0x10, 0x11, 0x12
+_VK_LSHIFT, _VK_RSHIFT = 0xA0, 0xA1
+_VK_LCTRL, _VK_RCTRL = 0xA2, 0xA3
+_VK_LALT, _VK_RALT = 0xA4, 0xA5
+_VK_LWIN, _VK_RWIN = 0x5B, 0x5C
+
+# 修饰名 -> 判定按下的虚拟键码集合（通用码 + 左右变体都查）
+_MOD_VKS = {
+    "ctrl": (_VK_CTRL, _VK_LCTRL, _VK_RCTRL),
+    "shift": (_VK_SHIFT, _VK_LSHIFT, _VK_RSHIFT),
+    "alt": (_VK_ALT, _VK_LALT, _VK_RALT),
+    "cmd": (_VK_LWIN, _VK_RWIN),
+}
+
+# pynput Key 属性名 -> 虚拟键码（named 键的"仍按住"判断用）
+_ATTR_VK = {
+    "space": 0x20, "tab": 0x09, "esc": 0x1B, "enter": 0x0D,
+    "backspace": 0x08, "delete": 0x2E, "insert": 0x2D,
+    "home": 0x24, "end": 0x23, "page_up": 0x21, "page_down": 0x22,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    **{f"f{i}": 0x6F + i for i in range(1, 13)},
+}
+# 虚拟键码 -> 展示名（录制用）
+_VK_NAMED = {vk: disp for attr, disp in _NAMED_DISPLAY.items()
+             for vk in [_ATTR_VK.get(attr)] if vk is not None}
+_VK_NAMED.update({0x6F + i: f"F{i}" for i in range(1, 13)})
+
+_VK_DOWN = 0x8000
+
+
+def _get_user32():
+    try:
+        import ctypes
+        return ctypes.windll.user32
+    except Exception:
+        return None
+
+
+def _vk_down(user32, vk: int) -> bool:
+    try:
+        return bool(user32.GetAsyncKeyState(vk) & _VK_DOWN)
+    except Exception:
+        return False
+
+
+def _vk_desc(vk: int) -> str:
+    """虚拟键码 -> 快捷键展示名；无法识别返回 ''。"""
+    if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
+        return chr(vk)
+    if vk in _PUNCT_INV:
+        return _PUNCT_INV[vk].upper()
+    if vk == 0x20:
+        return "Space"
+    return _VK_NAMED.get(vk, "")
+
+
 class Controller(QObject):
     hotkey_pressed = Signal()
 
@@ -154,9 +213,9 @@ class Controller(QObject):
             self.widget.show()
             win.tray_available = True
 
-        # 全局热键：pynput Listener（独立线程）+ 手动组合键匹配。
-        # 实测 GlobalHotKeys 在本机不触发回调，改为自己跟踪按键状态。
-        self._pressed_keys: set = set()
+        # 全局热键：pynput Listener（独立线程）只负责"按下事件"，
+        # 修饰键与触发键状态一律用 GetAsyncKeyState 实时查询。
+        self._combo_down = False  # 本次组合键已触发，防按键重复误触
         self._kb = None
         try:
             from pynput import keyboard as pynput_keyboard
@@ -164,13 +223,20 @@ class Controller(QObject):
             self._kb = pynput_keyboard
 
             def _on_press(key):
-                was = self._hotkey_active()
-                self._pressed_keys.add(key)
-                if self._hotkey_active() and not was:
+                if self._combo_down:
+                    # release 丢失的自愈：触发键已不在按下状态则复位
+                    if not self._trigger_still_down():
+                        self._combo_down = False
+                    else:
+                        return
+                if self._matches_hotkey(key):
+                    self._combo_down = True
                     self.hotkey_pressed.emit()
 
             def _on_release(key):
-                self._pressed_keys.discard(key)
+                # 组合键中任一成员松开即复位（下次完整按下才再触发）
+                if self._combo_down and self._is_combo_key(key):
+                    self._combo_down = False
 
             self._listener = pynput_keyboard.Listener(
                 on_press=_on_press, on_release=_on_release
@@ -179,26 +245,53 @@ class Controller(QObject):
             self._listener.start()
         except Exception as e:
             self._listener = None
-            logger.warning("全局热键监听启动失败，Ctrl+O 将不可用: %s", e)
+            logger.warning("全局热键监听启动失败，快捷键将不可用: %s", e)
 
-    def _hotkey_active(self) -> bool:
-        """当前配置的组合键是否处于按下状态（在监听线程中调用）。"""
-        kb = self._kb
-        if kb is None or self._hotkey_spec is None:
-            return False
-        mods, kind, value = self._hotkey_spec
+    def _mods_held(self, user32, mods) -> bool:
         for m in mods:
-            if not any(k in _mod_family(kb, m) for k in list(self._pressed_keys)):
+            if not any(_vk_down(user32, vk) for vk in _MOD_VKS[m]):
                 return False
+        return True
+
+    def _key_matches_spec(self, key) -> bool:
+        """当前按下事件的键是否等于快捷键的触发键。"""
+        if self._hotkey_spec is None or self._kb is None:
+            return False
+        _mods, kind, value = self._hotkey_spec
         if kind == "vk":
-            # 'o' 键按住 Ctrl 时 char 会变成控制字符，须按虚拟键码判断
-            return any(
-                getattr(k, "vk", None) == value
-                for k in list(self._pressed_keys)
-            )
-        return any(
-            k == getattr(kb.Key, value) for k in list(self._pressed_keys)
-        )
+            return getattr(key, "vk", None) == value
+        return key == getattr(self._kb.Key, value)
+
+    def _trigger_still_down(self) -> bool:
+        """触发键此刻是否仍按住（GetAsyncKeyState 实时查询）。"""
+        if self._hotkey_spec is None:
+            return False
+        user32 = _get_user32()
+        if user32 is None:
+            return False
+        _mods, kind, value = self._hotkey_spec
+        if kind == "vk":
+            return _vk_down(user32, value)
+        vk = _ATTR_VK.get(value)
+        return _vk_down(user32, vk) if vk is not None else False
+
+    def _matches_hotkey(self, key) -> bool:
+        """触发键匹配 且 所需修饰键此刻确实按住（实时状态）。"""
+        if self._hotkey_spec is None:
+            return False
+        user32 = _get_user32()
+        if user32 is None:
+            return False
+        mods = self._hotkey_spec[0]
+        return self._key_matches_spec(key) and self._mods_held(user32, mods)
+
+    def _is_combo_key(self, key) -> bool:
+        """释放的键是否属于当前快捷键组合（触发键或所需修饰键）。"""
+        if self._hotkey_spec is None or self._kb is None:
+            return False
+        if self._key_matches_spec(key):
+            return True
+        return any(key in _mod_family(self._kb, m) for m in self._hotkey_spec[0])
 
     # ---------- 快捷键设置 ----------
 
@@ -206,34 +299,24 @@ class Controller(QObject):
         return format_spec(self._hotkey_spec) if self._hotkey_spec else "?"
 
     def describe_pressed(self) -> str:
-        """把当前按下的组合键格式化为 'Ctrl+Shift+K'；无有效组合返回 ''。"""
-        kb = self._kb
-        if kb is None:
+        """把当前按住的组合键格式化为 'Ctrl+Shift+K'；无有效组合返回 ''。
+
+        直接扫描虚拟键实时状态，不依赖 press/release 事件配对。
+        """
+        user32 = _get_user32()
+        if user32 is None:
             return ""
-        rev_named = {getattr(kb.Key, a): d for a, d in _NAMED_DISPLAY.items()}
-        rev_named.update({getattr(kb.Key, f"f{i}"): f"F{i}" for i in range(1, 13)})
-        mods, key_desc = set(), ""
-        # 快照遍历：_pressed_keys 由监听线程并发增删，直接迭代可能 RuntimeError
-        for k in list(self._pressed_keys):
-            hit = False
-            for canon in _MOD_ORDER:
-                if k in _mod_family(kb, canon):
-                    mods.add(canon)
-                    hit = True
+        mods = {
+            name for name, vks in _MOD_VKS.items()
+            if any(_vk_down(user32, vk) for vk in vks)
+        }
+        key_desc = ""
+        for vk in range(0x08, 0xFE):
+            if _vk_down(user32, vk):
+                d = _vk_desc(vk)
+                if d:
+                    key_desc = d
                     break
-            if hit or key_desc:
-                continue
-            vk = getattr(k, "vk", None)
-            if vk and 0x41 <= vk <= 0x5A:
-                key_desc = chr(vk)
-            elif vk and 0x30 <= vk <= 0x39:
-                key_desc = chr(vk)
-            elif vk in _PUNCT_INV:
-                key_desc = _PUNCT_INV[vk].upper()
-            elif vk == 0x20:
-                key_desc = "Space"
-            elif k in rev_named:
-                key_desc = rev_named[k]
         if not mods or not key_desc:
             return ""
         return "+".join([_MOD_DISPLAY[m] for m in _MOD_ORDER if m in mods] + [key_desc])
@@ -245,6 +328,7 @@ class Controller(QObject):
         if spec is None:
             return False
         self._hotkey_spec = spec
+        self._combo_down = False
         QSettings().setValue("hotkey", spec_str.strip().lower())
         if self.tray is not None and hasattr(self, "a_capture"):
             self.a_capture.setText(f"快捷记录   {self.hotkey_display()}")
