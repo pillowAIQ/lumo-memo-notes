@@ -369,7 +369,7 @@ class CategoryRow(QWidget):
             self.arrow.setFixedSize(18, 18)
             self.arrow.setFlat(True)
             self.arrow.setStyleSheet(
-                "QPushButton { border:none; background:transparent; }"
+                "QPushButton { border:none; background:transparent; padding: 0; }"
             )
             self.arrow.clicked.connect(lambda: self.collapse_toggled.emit(cat_id))
         lay.addWidget(self.arrow, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -444,7 +444,7 @@ class MemoItemWidget(QWidget):
         self.done_btn.setFlat(True)
         self.done_btn.setStyleSheet(
             "QPushButton { border: 1.5px solid #d8d4c8; border-radius: 11px;"
-            " background: transparent; }"
+            " padding: 0; background: transparent; }"
             "QPushButton:hover { border-color: #2f9e63; }"
             "QPushButton[done=\"true\"] { background: #2f9e63;"
             " border-color: #2f9e63; color: white; font-weight: bold; font-size: 12px; }"
@@ -480,7 +480,7 @@ class MemoItemWidget(QWidget):
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.del_btn.setFlat(True)
         self.del_btn.setStyleSheet(
-            "QPushButton { border: none; color: #8f8a80; font-size: 15px; }"
+            "QPushButton { border: none; padding: 0; color: #8f8a80; font-size: 15px; }"
             "QPushButton:hover { color: #d64541; }"
         )
         self.del_btn.clicked.connect(lambda: self.win.delete_memo(self.memo.id))
@@ -492,7 +492,7 @@ class MemoItemWidget(QWidget):
         self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.restore_btn.setFlat(True)
         self.restore_btn.setStyleSheet(
-            "QPushButton { border: none; color: #7d786b; font-size: 14px; }"
+            "QPushButton { border: none; padding: 0; color: #7d786b; font-size: 14px; }"
             "QPushButton:hover { color: #2f9e63; }"
         )
         self.restore_btn.setVisible(False)

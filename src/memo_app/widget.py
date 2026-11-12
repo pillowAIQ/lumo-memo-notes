@@ -109,7 +109,7 @@ class TodoWidget(QWidget):
                 border: 1.5px solid rgba(255, 255, 255, 110);
                 border-radius: 9px;
                 background: transparent; color: transparent;
-                font-size: 10px; font-weight: bold;
+                font-size: 10px; font-weight: bold; padding: 0;
             }
             QPushButton#widgetDone:hover { border-color: #4ecb8d; color: #4ecb8d; }
             QPushButton#widgetDone[done="true"] {
