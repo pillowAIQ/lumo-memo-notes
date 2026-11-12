@@ -940,11 +940,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"回收站 {shown} 条")
             self.trash_title.setText(f"回收站 · {shown} 条备忘录")
         else:
-            done = sum(1 for m in self._memos if m.is_done) if self._memos else 0
-            text = f"共 {shown} 条"
-            if done:
-                text += f" · {done} 条已完成"
-            self.status_label.setText(text)
+            self.status_label.setText(f"共 {shown} 条")
 
     # ---------- 操作 ----------
 
