@@ -188,12 +188,17 @@ class Controller(QObject):
             return False
         mods, kind, value = self._hotkey_spec
         for m in mods:
-            if not any(k in _mod_family(kb, m) for k in self._pressed_keys):
+            if not any(k in _mod_family(kb, m) for k in list(self._pressed_keys)):
                 return False
         if kind == "vk":
             # 'o' 键按住 Ctrl 时 char 会变成控制字符，须按虚拟键码判断
-            return any(getattr(k, "vk", None) == value for k in self._pressed_keys)
-        return any(k == getattr(kb.Key, value) for k in self._pressed_keys)
+            return any(
+                getattr(k, "vk", None) == value
+                for k in list(self._pressed_keys)
+            )
+        return any(
+            k == getattr(kb.Key, value) for k in list(self._pressed_keys)
+        )
 
     # ---------- 快捷键设置 ----------
 
@@ -208,7 +213,8 @@ class Controller(QObject):
         rev_named = {getattr(kb.Key, a): d for a, d in _NAMED_DISPLAY.items()}
         rev_named.update({getattr(kb.Key, f"f{i}"): f"F{i}" for i in range(1, 13)})
         mods, key_desc = set(), ""
-        for k in self._pressed_keys:
+        # 快照遍历：_pressed_keys 由监听线程并发增删，直接迭代可能 RuntimeError
+        for k in list(self._pressed_keys):
             hit = False
             for canon in _MOD_ORDER:
                 if k in _mod_family(kb, canon):

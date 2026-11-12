@@ -111,9 +111,38 @@ class QuickCapture(QWidget):
         self.popup.hide()
         self.show()
         self.raise_()
+        self._force_activate()
+        # 激活是异步的，延迟补一次焦点兜底
+        QTimer.singleShot(60, self._focus_edit)
+
+    def _focus_edit(self) -> None:
+        if self.isVisible():
+            self.edit.setFocus()
+            self.edit.setCursorPosition(0)
+
+    def _force_activate(self) -> None:
+        """Windows 前台锁定可能拒绝 Tool 窗口激活，强制置前并激活。"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(self.winId())
+            foreground = user32.GetForegroundWindow()
+            cur_thread = kernel32.GetCurrentThreadId()
+            fore_thread = user32.GetWindowThreadProcessId(foreground, None)
+            attached = False
+            if fore_thread and fore_thread != cur_thread:
+                attached = bool(user32.AttachThreadInput(cur_thread, fore_thread, True))
+            try:
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(cur_thread, fore_thread, False)
+        except Exception:
+            pass
         self.activateWindow()
-        self.edit.setFocus()
-        self.edit.setCursorPosition(0)
 
     def _move_to_top_center(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos())
