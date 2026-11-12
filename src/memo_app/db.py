@@ -207,6 +207,9 @@ def create_category(name: str) -> int:
     name = name.strip()
     if not name:
         raise ValueError("category name is empty")
+    # 与快捷输入的 /分类名 语法保持一致：不允许空白和 /
+    if any(ch.isspace() for ch in name) or "/" in name:
+        raise ValueError("分类名不能包含空格或 /")
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO categories(name, created_at) VALUES (?, ?)",
@@ -230,11 +233,11 @@ def set_category_collapsed(cat_id: int, collapsed: bool) -> None:
 
 
 def find_or_create_category(name: str) -> int:
-    """按名字找分类，没有则创建，返回 id。"""
+    """按名字找分类（大小写不敏感），没有则创建，返回 id。"""
     name = name.strip()
     with db() as conn:
         row = conn.execute(
-            "SELECT id FROM categories WHERE name = ?", (name,)
+            "SELECT id FROM categories WHERE name = ? COLLATE NOCASE", (name,)
         ).fetchone()
         if row is not None:
             return int(row["id"])

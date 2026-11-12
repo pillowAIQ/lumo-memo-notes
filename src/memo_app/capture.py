@@ -130,12 +130,11 @@ class QuickCapture(QWidget):
         self.hide()
         if not text:
             return
-        # "/分类名 内容" 语法解析；分类名含 / 的按普通文本处理
-        m = re.match(r"^/(\S+)\s+(.+)$", text)
+        # "/分类名 内容" 或 "/分类名"（仅创建分类）语法解析；
+        # 分类名含 / 的按普通文本处理
+        m = re.match(r"^/(\S+)(?:\s+(.+))?$", text)
         if m and "/" not in m.group(1):
-            self.submitted.emit(m.group(2).strip(), m.group(1))
-        elif re.match(r"^/\S+$", text):
-            pass  # 只有 "/xxx" 没有内容，不保存
+            self.submitted.emit((m.group(2) or "").strip(), m.group(1))
         else:
             self.submitted.emit(text, "")
 
@@ -189,7 +188,12 @@ class QuickCapture(QWidget):
                     if key == Qt.Key.Key_Up and count:
                         self.popup.setCurrentRow(max(cur - 1, 0) if cur >= 0 else count - 1)
                         return True
-                    if key in (Qt.Key.Key_Tab, Qt.Key.Key_Space, Qt.Key.Key_Return):
+                    if key in (
+                        Qt.Key.Key_Tab,
+                        Qt.Key.Key_Space,
+                        Qt.Key.Key_Return,
+                        Qt.Key.Key_Enter,  # 小键盘回车
+                    ):
                         row = cur if cur >= 0 else 0
                         if count:
                             self._complete_cat(self.popup.item(row).text())
