@@ -118,7 +118,6 @@ QWidget#catRow { border-radius: 8px; }
 QWidget#catRow:hover { background: #e7e4d9; }
 QWidget#catRow[selected="true"] { background: #fbeee5; }
 QLabel#catName { font-size: 13px; color: #3a362e; }
-QLabel#catArrow { font-size: 10px; color: #7d786b; }
 QPushButton#catDel {
     border: none; background: transparent; color: #8f8a80;
     font-size: 13px; padding: 0 4px;
@@ -338,13 +337,12 @@ class NameDialog(QDialog):
 
 
 class CategoryRow(QWidget):
-    """侧边栏分类行：点击名称选中，点击箭头折叠，悬停出现删除。"""
+    """侧边栏分类行：点击选中，悬停出现删除。"""
 
     activated = Signal(int)          # cat_id，0 = 全部
-    collapse_toggled = Signal(int)
     delete_requested = Signal(int)
 
-    def __init__(self, cat_id: int, name: str, collapsed: bool, all_row: bool = False):
+    def __init__(self, cat_id: int, name: str):
         super().__init__()
         self.cat_id = cat_id
         self.setObjectName("catRow")
@@ -353,21 +351,8 @@ class CategoryRow(QWidget):
         self.setFixedHeight(30)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 6, 0)
+        lay.setContentsMargins(10, 0, 6, 0)
         lay.setSpacing(4)
-
-        if all_row:
-            self.arrow = QLabel("")
-        else:
-            self.arrow = QPushButton("▸" if collapsed else "▾")
-            self.arrow.setObjectName("catArrow")
-            self.arrow.setFixedSize(18, 18)
-            self.arrow.setFlat(True)
-            self.arrow.setStyleSheet(
-                "QPushButton { border:none; background:transparent; padding: 0; }"
-            )
-            self.arrow.clicked.connect(lambda: self.collapse_toggled.emit(cat_id))
-        lay.addWidget(self.arrow, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.name = QLabel(name)
         self.name.setObjectName("catName")
@@ -385,11 +370,6 @@ class CategoryRow(QWidget):
         self.setProperty("selected", on)
         self.style().unpolish(self)
         self.style().polish(self)
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        if not isinstance(self.arrow, QPushButton):
-            return
-        self.arrow.setText("▸" if collapsed else "▾")
 
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
@@ -785,28 +765,20 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
 
-        all_row = CategoryRow(0, "全部", False, all_row=True)
+        all_row = CategoryRow(0, "全部")
         all_row.set_selected(self.selected_category is None)
         all_row.activated.connect(self._on_cat_select)
         self.side_rows.addWidget(all_row)
 
         for cat in self._categories:
-            row = CategoryRow(cat.id, cat.name, cat.collapsed)
+            row = CategoryRow(cat.id, cat.name)
             row.set_selected(self.selected_category == cat.id)
             row.activated.connect(self._on_cat_select)
-            row.collapse_toggled.connect(self._on_cat_collapse)
             row.delete_requested.connect(self._on_cat_delete)
             self.side_rows.addWidget(row)
 
     def _on_cat_select(self, cat_id: int) -> None:
         self.selected_category = None if cat_id == 0 else cat_id
-        self.reload()
-
-    def _on_cat_collapse(self, cat_id: int) -> None:
-        cat = next((c for c in self._categories if c.id == cat_id), None)
-        if cat is None:
-            return
-        db.set_category_collapsed(cat_id, not cat.collapsed)
         self.reload()
 
     def _on_cat_delete(self, cat_id: int) -> None:
@@ -840,25 +812,11 @@ class MainWindow(QMainWindow):
                 m for m in memos
                 if self.selected_category in self._memo_cats.get(m.id, set())
             ]
-        collapsed = {c.id for c in self._categories if c.collapsed}
-
-        def visible(m: Memo) -> bool:
-            cats = self._memo_cats.get(m.id, set())
-            return not cats or any(c not in collapsed for c in cats)
-
-        return [m for m in memos if visible(m)]
+        return memos
 
     def visible_memos(self) -> list[Memo]:
-        """桌面挂件用：非回收站、折叠分类隐私过滤后的全部备忘录（不受侧边栏选中/回收站浏览影响）。"""
-        cats = {c.id: c for c in db.list_categories()}
-        collapsed = {c.id for c in cats.values() if c.collapsed}
-        cat_map = db.memo_category_map()
-        return [
-            m
-            for m in db.list_memos()
-            if not cat_map.get(m.id)
-            or any(c not in collapsed for c in cat_map.get(m.id))
-        ]
+        """桌面挂件用：非回收站的全部备忘录（不受侧边栏选中/回收站浏览影响；分组折叠由挂件自身控制）。"""
+        return db.list_memos()
 
     def assign_categories(self, memo_id: int) -> None:
         dlg = CategoryPickerDialog(

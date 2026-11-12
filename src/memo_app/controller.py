@@ -139,7 +139,7 @@ class Controller(QObject):
         self.capture.submitted.connect(self._on_capture_submit)
         self.hotkey_pressed.connect(self.capture.toggle)
 
-        # 桌面待办挂件（跟随主窗口的分类折叠隐私过滤）
+        # 桌面待办挂件（分组默认折叠，隐私由挂件自身控制）
         self.widget = TodoWidget()
         self.widget._memo_provider = self.win.visible_memos
         self.widget.open_main.connect(self.show_main)
