@@ -219,7 +219,15 @@ def create_category(name: str) -> int:
 
 
 def delete_category(cat_id: int) -> None:
+    """删除分类：其中的备忘录移入回收站（软删除），分类及关联一并删除。"""
+    now = now_iso()
     with db() as conn:
+        conn.execute(
+            "UPDATE memos SET deleted_at = ?, updated_at = ? "
+            "WHERE deleted_at IS NULL AND id IN "
+            "(SELECT memo_id FROM memo_categories WHERE category_id = ?)",
+            (now, now, cat_id),
+        )
         conn.execute("DELETE FROM memo_categories WHERE category_id = ?", (cat_id,))
         conn.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
 

@@ -785,7 +785,8 @@ class MainWindow(QMainWindow):
         cat = next((c for c in self._categories if c.id == cat_id), None)
         name = cat.name if cat else "该分类"
         if QMessageBox.question(
-            self, "删除分类", f"确定删除分类「{name}」吗？备忘录本身不会被删除。"
+            self, "删除分类",
+            f"确定删除分类「{name}」吗？其中的备忘录将移入回收站。",
         ) == QMessageBox.StandardButton.Yes:
             db.delete_category(cat_id)
             if self.selected_category == cat_id:
