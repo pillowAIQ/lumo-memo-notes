@@ -186,6 +186,22 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 QLabel#emptyLabel { color: #8f8a80; font-size: 14px; border: none; background: transparent; }
 QLabel#statusLabel { color: #8f8a80; font-size: 11px; border: none; background: transparent; }
+
+/* 回收站横幅 */
+QWidget#trashBar {
+    background: #faf5e9; border: 1px solid #e9e1cd; border-radius: 10px;
+}
+QPushButton#trashBack {
+    border: none; background: transparent; color: #5c574c;
+    font-weight: 600; padding: 4px 8px;
+}
+QPushButton#trashBack:hover { color: #d96c3f; }
+QLabel#trashTitle { color: #7d786b; font-size: 12px; border: none; background: transparent; }
+QPushButton#trashPurge {
+    border: 1px solid #e5c8bc; border-radius: 8px; background: #ffffff;
+    color: #b3503f; padding: 4px 14px;
+}
+QPushButton#trashPurge:hover { background: #fdf1ec; border-color: #d98d7d; color: #d64541; }
 """.replace("@CHECK@", _CHECK_PNG)
 
 
@@ -697,6 +713,27 @@ class MainWindow(QMainWindow):
         self.input_edit.setPlaceholderText("想记点什么？回车保存 · 双击条目可编辑")
         maincol.addWidget(self.input_edit)
 
+        # 回收站横幅：仅回收站模式显示（返回 + 计数 + 清空）
+        self.trash_bar = QWidget()
+        self.trash_bar.setObjectName("trashBar")
+        self.trash_bar.setVisible(False)
+        tbl = QHBoxLayout(self.trash_bar)
+        tbl.setContentsMargins(12, 5, 10, 5)
+        tbl.setSpacing(6)
+        back_btn = QPushButton("← 返回")
+        back_btn.setObjectName("trashBack")
+        back_btn.clicked.connect(lambda: self._set_trash(False))
+        tbl.addWidget(back_btn)
+        self.trash_title = QLabel("")
+        self.trash_title.setObjectName("trashTitle")
+        tbl.addWidget(self.trash_title)
+        tbl.addStretch(1)
+        self.trash_purge_btn = QPushButton("清空回收站")
+        self.trash_purge_btn.setObjectName("trashPurge")
+        self.trash_purge_btn.clicked.connect(self._on_purge_all)
+        tbl.addWidget(self.trash_purge_btn)
+        maincol.addWidget(self.trash_bar)
+
         self.stack = QStackedWidget()
         self.list = QListWidget()
         self.list.setSpacing(8)
@@ -726,12 +763,8 @@ class MainWindow(QMainWindow):
         bottom = QHBoxLayout()
         self.status_label = QLabel()
         self.status_label.setObjectName("statusLabel")
-        self.purge_btn = QPushButton("清空回收站")
-        self.purge_btn.setObjectName("pillBtn")
-        self.purge_btn.setVisible(False)
         bottom.addWidget(self.status_label)
         bottom.addStretch(1)
-        bottom.addWidget(self.purge_btn)
         maincol.addLayout(bottom)
 
         body.addLayout(maincol, 1)
@@ -742,7 +775,6 @@ class MainWindow(QMainWindow):
         # 信号
         self.input_edit.returnPressed.connect(self._on_add)
         self.search_edit.textChanged.connect(lambda _t: self.reload())
-        self.purge_btn.clicked.connect(self._on_purge_all)
         self.list.itemSelectionChanged.connect(self._sync_selection)
 
         sc = QShortcut(QKeySequence.StandardKey.Delete, self.list)
@@ -849,7 +881,7 @@ class MainWindow(QMainWindow):
         if on:
             self.search_edit.setVisible(False)
             self.search_action.setChecked(False)
-        self.purge_btn.setVisible(on)
+        self.trash_bar.setVisible(on)
         self.reload()
 
     def _open_settings(self) -> None:
@@ -906,6 +938,7 @@ class MainWindow(QMainWindow):
     def _update_status(self, shown: int) -> None:
         if self.trash_mode:
             self.status_label.setText(f"回收站 {shown} 条")
+            self.trash_title.setText(f"回收站 · {shown} 条备忘录")
         else:
             done = sum(1 for m in self._memos if m.is_done) if self._memos else 0
             text = f"共 {shown} 条"
