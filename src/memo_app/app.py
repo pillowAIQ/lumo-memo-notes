@@ -474,16 +474,15 @@ class MemoItemWidget(QWidget):
         self.host_stack.addWidget(self.edit)
         lay.addWidget(self.host_stack, 1)
 
-        # 删除按钮：悬停才显示（与侧栏分类删除一致，减少视觉噪音）
+        # 删除按钮：常显暖灰，悬停变红
         self.del_btn = QPushButton("×")
         self.del_btn.setFixedSize(22, 22)
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.del_btn.setFlat(True)
         self.del_btn.setStyleSheet(
-            "QPushButton { border: none; color: #b5b0a2; font-size: 15px; }"
+            "QPushButton { border: none; color: #8f8a80; font-size: 15px; }"
             "QPushButton:hover { color: #d64541; }"
         )
-        self.del_btn.setVisible(False)
         self.del_btn.clicked.connect(lambda: self.win.delete_memo(self.memo.id))
         lay.addWidget(self.del_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -553,7 +552,7 @@ class MemoItemWidget(QWidget):
 
         trash = self.win.trash_mode
         self.done_btn.setVisible(not trash)
-        self.del_btn.setVisible(False)  # 由 enterEvent 控制
+        self.del_btn.setVisible(not trash)
         self.restore_btn.setVisible(trash)
 
     def _elided(self, text: str) -> str:
@@ -568,15 +567,6 @@ class MemoItemWidget(QWidget):
         super().resizeEvent(e)
         if self.content_label.isVisible():
             self.content_label.setText(self._elided(self.full_text))
-
-    def enterEvent(self, e):  # noqa: N802
-        if not self.win.trash_mode and not self._editing:
-            self.del_btn.setVisible(True)
-        super().enterEvent(e)
-
-    def leaveEvent(self, e):  # noqa: N802
-        self.del_btn.setVisible(False)
-        super().leaveEvent(e)
 
     # ---------- 编辑 ----------
 
