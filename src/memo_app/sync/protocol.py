@@ -138,6 +138,11 @@ def validate_op(op: object) -> dict:
         raise ProtocolError("invalid entity_uuid")
     if not _is_finite_num(op.get("rev_ts")):
         raise ProtocolError("invalid rev_ts")
+    # rev_seq：同 writer 因果序（旧批次可缺省，视为 0）；
+    # 上限 SQLite INTEGER，防止接收端 int() 溢出卡死日志
+    rs = op.get("rev_seq", 0)
+    if not _is_int(rs) or rs < 0 or rs > 2**63 - 1:
+        raise ProtocolError("invalid rev_seq")
     if not is_uuid(op.get("writer_id")):
         raise ProtocolError("invalid op writer_id")
     if op["op"] == "upsert" and not isinstance(op.get("data"), dict):

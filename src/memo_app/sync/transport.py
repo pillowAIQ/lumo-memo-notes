@@ -243,6 +243,27 @@ class WebDAVClient:
 
     # ---------- WebDAV 操作 ----------
 
+    def mkcol_root(self) -> None:
+        """创建 memo-sync 根集合（vault 的父目录）；已存在（405）视为成功。"""
+        url = self._base_url + protocol.REMOTE_ROOT
+        req = urllib.request.Request(
+            url, method="MKCOL", headers={"Authorization": self._auth}
+        )
+        try:
+            resp = self._opener.open(req, timeout=self.timeout)
+            resp.read(4096)
+        except urllib.error.HTTPError as e:
+            try:
+                e.read(4096)
+            except Exception:
+                pass
+            if e.code == 405:
+                return
+            _raise_for_status(e.code)
+            raise WebDAVError(f"HTTP {e.code}", e.code) from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise WebDAVError(f"network error: {type(e).__name__}") from e
+
     def mkcol(self, rel_path: str) -> None:
         """创建集合；已存在（405）视为成功。"""
         try:
