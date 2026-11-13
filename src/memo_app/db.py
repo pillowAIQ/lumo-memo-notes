@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,9 +39,14 @@ class Memo:
     created_at: str
     updated_at: str
     deleted_at: str | None
+    due_ts: int | None = None      # 截止时间（Unix 秒，本地时区）
+    priority: int = 0              # 0=无 1=低 2=中 3=高
+    recur: str | None = None       # daily/weekly/monthly/yearly
+    notified: int = 0              # 本次截止是否已提醒
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Memo":
+        keys = set(row.keys())
         return cls(
             id=row["id"],
             content=row["content"],
@@ -49,6 +55,10 @@ class Memo:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             deleted_at=row["deleted_at"],
+            due_ts=row["due_ts"] if "due_ts" in keys else None,
+            priority=row["priority"] if "priority" in keys else 0,
+            recur=row["recur"] if "recur" in keys else None,
+            notified=row["notified"] if "notified" in keys else 0,
         )
 
 
@@ -72,7 +82,11 @@ def init_db() -> None:
                 is_done INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                deleted_at TEXT
+                deleted_at TEXT,
+                due_ts INTEGER,
+                priority INTEGER NOT NULL DEFAULT 0,
+                recur TEXT,
+                notified INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_memos_list
                 ON memos(deleted_at, is_pinned DESC, is_done, created_at DESC);
@@ -89,6 +103,20 @@ def init_db() -> None:
             );
             """
         )
+        _migrate_memos(conn)
+
+
+def _migrate_memos(conn: sqlite3.Connection) -> None:
+    """旧库补列：due_ts / priority / recur / notified。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(memos)")}
+    for col, ddl in (
+        ("due_ts", "ALTER TABLE memos ADD COLUMN due_ts INTEGER"),
+        ("priority", "ALTER TABLE memos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"),
+        ("recur", "ALTER TABLE memos ADD COLUMN recur TEXT"),
+        ("notified", "ALTER TABLE memos ADD COLUMN notified INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if col not in cols:
+            conn.execute(ddl)
 
 
 @contextmanager
@@ -102,15 +130,22 @@ def _like_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def add_memo(content: str) -> int:
+def add_memo(
+    content: str,
+    *,
+    due_ts: int | None = None,
+    priority: int = 0,
+    recur: str | None = None,
+) -> int:
     content = content.strip()
     if not content:
         raise ValueError("memo content is empty")
     ts = now_iso()
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO memos(content, created_at, updated_at) VALUES (?, ?, ?)",
-            (content, ts, ts),
+            "INSERT INTO memos(content, created_at, updated_at, due_ts, priority, recur)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (content, ts, ts, due_ts, priority, recur),
         )
         return int(cur.lastrowid)
 
@@ -159,11 +194,15 @@ def toggle_pin(memo_id: int) -> None:
 
 
 def toggle_done(memo_id: int) -> None:
-    """切换完成状态：标记完成时同时移入回收站；已完成的取消完成标记。"""
+    """切换完成状态。
+
+    - 普通备忘录：标记完成时移入回收站；已完成的取消完成标记。
+    - 重复任务：不进回收站，把截止时间推进到下一周期，保持待办。
+    """
     now = now_iso()
     with db() as conn:
         row = conn.execute(
-            "SELECT is_done FROM memos WHERE id = ?", (memo_id,)
+            "SELECT is_done, due_ts, recur FROM memos WHERE id = ?", (memo_id,)
         ).fetchone()
         if row is None:
             return
@@ -172,12 +211,107 @@ def toggle_done(memo_id: int) -> None:
                 "UPDATE memos SET is_done = 0, updated_at = ? WHERE id = ?",
                 (now, memo_id),
             )
-        else:
-            conn.execute(
-                "UPDATE memos SET is_done = 1, deleted_at = ?, updated_at = ? "
-                "WHERE id = ?",
-                (now, now, memo_id),
-            )
+            return
+        recur = row["recur"]
+        if recur and row["due_ts"]:
+            nxt = next_recur_ts(int(row["due_ts"]), recur)
+            if nxt is not None:
+                conn.execute(
+                    "UPDATE memos SET due_ts = ?, notified = 0, updated_at = ? "
+                    "WHERE id = ?",
+                    (nxt, now, memo_id),
+                )
+                return
+        # 无重复或无截止时间：维持原有"完成即进回收站"行为
+        conn.execute(
+            "UPDATE memos SET is_done = 1, deleted_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (now, now, memo_id),
+        )
+
+
+# ---------- 截止 / 优先级 / 重复 ----------
+
+RECUR_DAILY, RECUR_WEEKLY, RECUR_MONTHLY, RECUR_YEARLY = (
+    "daily", "weekly", "monthly", "yearly",
+)
+RECUR_LABELS = {
+    RECUR_DAILY: "每天",
+    RECUR_WEEKLY: "每周",
+    RECUR_MONTHLY: "每月",
+    RECUR_YEARLY: "每年",
+}
+PRIORITY_LABELS = {0: "无", 1: "低", 2: "中", 3: "高"}
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    """月份加法，日期越界时收敛到月末（1/31 + 1月 -> 2/28）。"""
+    m = dt.month - 1 + months
+    y = dt.year + m // 12
+    m = m % 12 + 1
+    # 当月天数
+    if m == 12:
+        nxt = datetime(y + 1, 1, 1)
+    else:
+        nxt = datetime(y, m + 1, 1)
+    dim = (nxt - datetime(y, m, 1)).days
+    return dt.replace(year=y, month=m, day=min(dt.day, dim))
+
+
+def next_recur_ts(due_ts: int, recur: str) -> int | None:
+    """计算下一次重复截止时间；无法识别规则返回 None。"""
+    dt = datetime.fromtimestamp(due_ts)
+    if recur == RECUR_DAILY:
+        nxt = dt.timestamp() + 86400
+    elif recur == RECUR_WEEKLY:
+        nxt = dt.timestamp() + 7 * 86400
+    elif recur == RECUR_MONTHLY:
+        nxt = _add_months(dt, 1).timestamp()
+    elif recur == RECUR_YEARLY:
+        nxt = _add_months(dt, 12).timestamp()
+    else:
+        return None
+    return int(nxt)
+
+
+def set_task_props(
+    memo_id: int,
+    *,
+    due_ts: int | None,
+    priority: int,
+    recur: str | None,
+) -> None:
+    """设置截止/优先级/重复；截止变化时重置提醒标记。"""
+    priority = max(0, min(3, int(priority)))
+    if recur not in RECUR_LABELS:
+        recur = None
+    with db() as conn:
+        old = conn.execute(
+            "SELECT due_ts FROM memos WHERE id = ?", (memo_id,)
+        ).fetchone()
+        reset = 1 if old is not None and old["due_ts"] != due_ts else 0
+        conn.execute(
+            "UPDATE memos SET due_ts = ?, priority = ?, recur = ?, "
+            "notified = notified * ?, updated_at = ? WHERE id = ?",
+            (due_ts, priority, recur, 1 - reset, now_iso(), memo_id),
+        )
+
+
+def memos_due(now_ts: int | None = None) -> list[Memo]:
+    """已到截止时间且未提醒的备忘录（含逾期）。"""
+    now_ts = int(time.time()) if now_ts is None else now_ts
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM memos WHERE deleted_at IS NULL AND is_done = 0 "
+            "AND due_ts IS NOT NULL AND due_ts <= ? AND notified = 0 "
+            "ORDER BY due_ts",
+            (now_ts,),
+        ).fetchall()
+    return [Memo.from_row(r) for r in rows]
+
+
+def mark_notified(memo_id: int) -> None:
+    _touch(memo_id, notified=1)
 
 
 def soft_delete(memo_id: int) -> None:

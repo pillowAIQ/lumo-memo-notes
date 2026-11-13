@@ -54,7 +54,7 @@ class QuickCapture(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit()
         self.edit.setPlaceholderText(
-            "记点什么…  /分类名 归类 · Enter 保存 · Esc 关闭"
+            "记点什么…  /分类名 归类 · 明天9点 设截止 · Enter 保存 · Esc 关闭"
         )
         self.edit.textChanged.connect(self._refresh_popup)
         self.edit.installEventFilter(self)
@@ -106,7 +106,7 @@ class QuickCapture(QWidget):
         self._move_to_top_center()
         self.edit.clear()
         self.edit.setPlaceholderText(
-            "记点什么…  /分类名 归类 · Enter 保存 · Esc 关闭"
+            "记点什么…  /分类名 归类 · 明天9点 设截止 · Enter 保存 · Esc 关闭"
         )
         self.popup.hide()
         self.show()
