@@ -252,6 +252,73 @@ def parse_due(text: str) -> tuple[int | None, str]:
     return None, text
 
 
+# ---------- 任务标记：!优先级 / @重复 / 提前N分钟 ----------
+
+# 独立 token 才识别：!高 / ！中 / @每周（标记前须空白/行首，后须空白/标点/句末）
+_TOKEN_END = r"[\s，,。.;；:：、！？!?]"
+_RE_PRIORITY = re.compile(r"(?<!\S)[!！]([高中低])(?=" + _TOKEN_END + r"|$)")
+_PRIORITY_MAP = {"低": 1, "中": 2, "高": 3}
+_RE_RECUR = re.compile(r"(?<!\S)@(?:每(天|周|月|年))(?=" + _TOKEN_END + r"|$)")
+_RECUR_MAP = {"天": "daily", "周": "weekly", "月": "monthly", "年": "yearly"}
+# advance 需后接"提醒语境"或"标点/空白* + 句末/提醒词"，避免"提前30分钟，改到…"误删正文
+_RE_ADVANCE = re.compile(
+    r"提前\s*(半|\d+)\s*(分钟|小时|钟头|天)"
+    r"(?=[\s，,。.;；:：、！？!?]*(?:提醒|通知|闹钟|截止|到期)"
+    r"|[\s，,。.;；:：、！？!?]*$)"
+)
+_ADVANCE_UNIT = {"分钟": 1, "小时": 60, "钟头": 60, "天": 1440}
+_ADVANCE_MAX = 7 * 1440  # 提前量上限 7 天
+# 句首"提醒我/通知我"冗余前缀
+_RE_NOTIFY = re.compile(r"^(?:请|帮我|麻烦)?(?:提醒我|通知我)[，,、。.!！?？;；:：\s]*")
+_EDGE_PUNCT = r"[\s，,、。.；;：:~～\-—（）「」『』【】/！？!?]+"
+
+
+def _advance_minutes(num_s: str, unit: str) -> int | None:
+    if len(num_s) > 6:
+        return None
+    if num_s == "半":
+        minutes = 30 if unit in ("小时", "钟头") else None
+    else:
+        minutes = int(num_s) * _ADVANCE_UNIT[unit]
+    if minutes is None or minutes <= 0 or minutes > _ADVANCE_MAX:
+        return None
+    return minutes
+
+
+def parse_task(text: str) -> tuple[int | None, int, str | None, int, str]:
+    """解析截止时间 + 优先级/重复/提前提醒标记。
+
+    返回 (due_ts, priority, recur, advance_min, cleaned_text)。
+    priority=0 / recur=None / advance_min=0 表示未识别到对应标记。
+    """
+    if not text or not text.strip():
+        return None, 0, None, 0, text
+
+    spans: list[tuple[int, int]] = []
+    priority = 0
+    recur = None
+    advance = 0
+
+    for m in _RE_PRIORITY.finditer(text):
+        priority = _PRIORITY_MAP[m.group(1)]
+        spans.append((m.start(), m.end()))
+    for m in _RE_RECUR.finditer(text):
+        recur = _RECUR_MAP[m.group(1)]
+        spans.append((m.start(), m.end()))
+    for m in _RE_ADVANCE.finditer(text):
+        minutes = _advance_minutes(m.group(1), m.group(2))
+        if minutes is None or minutes <= 0:
+            continue
+        advance = minutes
+        spans.append((m.start(), m.end()))
+
+    work = _strip_spans(text, spans) if spans else text
+    work = _RE_NOTIFY.sub("", work.lstrip(), count=1)
+    work = re.sub(r"^" + _EDGE_PUNCT, "", work)
+    due_ts, cleaned = parse_due(work)
+    return due_ts, priority, recur, advance, cleaned
+
+
 def _strip_spans(text: str, spans: list[tuple[int, int]]) -> str:
     """移除时间短语，整理残留空白/标点。"""
     spans = sorted(spans)
@@ -262,7 +329,7 @@ def _strip_spans(text: str, spans: list[tuple[int, int]]) -> str:
         pos = e
     out.append(text[pos:])
     cleaned = "".join(out)
-    edge = r"[\s,，、。.；;：:~～\-—（）「」『』【】/]"
+    edge = r"[\s,，、。.；;：:~～\-—（）「」『』【】/！？!?]"
     cleaned = re.sub(edge + r"+$", "", cleaned)
     cleaned = re.sub(r"^" + edge + r"+", "", cleaned)
     cleaned = re.sub(r" {2,}", " ", cleaned).strip()

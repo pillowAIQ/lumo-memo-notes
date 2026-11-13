@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import db
+from . import db, nlp_time
 from .db import Memo
 
 MAX_ROWS = 8
@@ -272,19 +272,29 @@ class TodoWidget(QWidget):
         btn.clicked.connect(lambda _c=False, i=mid: self.done_toggled.emit(i))
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # 截止/优先级/重复标记前缀
+        # 截止/优先级/重复标记前缀（截止带具体时间）
         markers = ""
+        tip_parts = []
         if memo.due_ts:
-            markers += "⏰"
+            due_str = nlp_time.format_due(memo.due_ts)
+            markers += f"⏰{due_str} "
+            tip_parts.append(due_str)
+            if memo.remind_advance:
+                tip_parts.append(f"提前{memo.remind_advance}分钟提醒")
         if memo.priority >= 1:
-            markers += "❗"
+            markers += "❗ "
+            tip_parts.append(f"优先级{db.PRIORITY_LABELS.get(memo.priority, '')}")
         if memo.recur:
-            markers += "↻"
-        display = (markers + " " if markers else "") + memo.content
+            markers += "↻ "
+            tip_parts.append(f"重复{db.RECUR_LABELS.get(memo.recur, '')}")
+        display = markers + memo.content
+        # label 对鼠标透明，tooltip 需挂到 row 才能触发
+        row.setToolTip(
+            memo.content + ("\n" + " · ".join(tip_parts) if tip_parts else "")
+        )
 
         label = QLabel(display)
         label.setObjectName("widgetItem")
-        label.setToolTip(memo.content)
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # 单行省略：宽度固定（面板定宽 300，扣除边距/圆圈/间距）
         label.setFixedWidth(300 - 12 * 2 - 18 - 8 - 8)

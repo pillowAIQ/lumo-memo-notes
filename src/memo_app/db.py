@@ -43,6 +43,7 @@ class Memo:
     priority: int = 0              # 0=无 1=低 2=中 3=高
     recur: str | None = None       # daily/weekly/monthly/yearly
     notified: int = 0              # 本次截止是否已提醒
+    remind_advance: int = 0        # 提前提醒分钟数（0=到期时提醒）
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Memo":
@@ -59,6 +60,7 @@ class Memo:
             priority=row["priority"] if "priority" in keys else 0,
             recur=row["recur"] if "recur" in keys else None,
             notified=row["notified"] if "notified" in keys else 0,
+            remind_advance=row["remind_advance"] if "remind_advance" in keys else 0,
         )
 
 
@@ -86,7 +88,8 @@ def init_db() -> None:
                 due_ts INTEGER,
                 priority INTEGER NOT NULL DEFAULT 0,
                 recur TEXT,
-                notified INTEGER NOT NULL DEFAULT 0
+                notified INTEGER NOT NULL DEFAULT 0,
+                remind_advance INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_memos_list
                 ON memos(deleted_at, is_pinned DESC, is_done, created_at DESC);
@@ -107,16 +110,21 @@ def init_db() -> None:
 
 
 def _migrate_memos(conn: sqlite3.Connection) -> None:
-    """旧库补列：due_ts / priority / recur / notified。"""
+    """旧库补列：due_ts / priority / recur / notified / remind_advance。"""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(memos)")}
     for col, ddl in (
         ("due_ts", "ALTER TABLE memos ADD COLUMN due_ts INTEGER"),
         ("priority", "ALTER TABLE memos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"),
         ("recur", "ALTER TABLE memos ADD COLUMN recur TEXT"),
         ("notified", "ALTER TABLE memos ADD COLUMN notified INTEGER NOT NULL DEFAULT 0"),
+        ("remind_advance", "ALTER TABLE memos ADD COLUMN remind_advance INTEGER NOT NULL DEFAULT 0"),
     ):
         if col not in cols:
             conn.execute(ddl)
+    # 不变量：recur/remind_advance 依赖 due_ts，无截止的一律清掉
+    conn.execute(
+        "UPDATE memos SET recur = NULL, remind_advance = 0 WHERE due_ts IS NULL"
+    )
 
 
 @contextmanager
@@ -136,16 +144,25 @@ def add_memo(
     due_ts: int | None = None,
     priority: int = 0,
     recur: str | None = None,
+    remind_advance: int = 0,
 ) -> int:
     content = content.strip()
     if not content:
         raise ValueError("memo content is empty")
+    priority = max(0, min(3, int(priority)))
+    # recur/advance 依赖 due_ts：无截止时间时不存（避免后补截止静默生效）
+    if due_ts is None:
+        recur = None
+        remind_advance = 0
+    elif recur not in RECUR_LABELS:
+        recur = None
+    remind_advance = min(7 * 1440, max(0, int(remind_advance)))
     ts = now_iso()
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO memos(content, created_at, updated_at, due_ts, priority, recur)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (content, ts, ts, due_ts, priority, recur),
+            "INSERT INTO memos(content, created_at, updated_at, due_ts, priority,"
+            " recur, remind_advance) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (content, ts, ts, due_ts, priority, recur, remind_advance),
         )
         return int(cur.lastrowid)
 
@@ -214,7 +231,19 @@ def toggle_done(memo_id: int) -> None:
             return
         recur = row["recur"]
         if recur and row["due_ts"]:
-            nxt = next_recur_ts(int(row["due_ts"]), recur)
+            # 跳过所有已过去的周期，推进到下一个未来截止（加迭代上限防异常）
+            nxt = int(row["due_ts"])
+            now_ts = time.time()
+            for _ in range(500):
+                cand = next_recur_ts(nxt, recur)
+                if cand is None:
+                    nxt = None
+                    break
+                nxt = cand
+                if nxt > now_ts:
+                    break
+            else:
+                nxt = None
             if nxt is not None:
                 conn.execute(
                     "UPDATE memos SET due_ts = ?, notified = 0, updated_at = ? "
@@ -274,37 +303,78 @@ def next_recur_ts(due_ts: int, recur: str) -> int | None:
     return int(nxt)
 
 
+_UNSET = object()
+
+
 def set_task_props(
     memo_id: int,
     *,
-    due_ts: int | None,
-    priority: int,
-    recur: str | None,
+    due_ts: object = _UNSET,
+    priority: object = _UNSET,
+    recur: object = _UNSET,
+    remind_advance: object = _UNSET,
 ) -> None:
-    """设置截止/优先级/重复；截止变化时重置提醒标记。"""
-    priority = max(0, min(3, int(priority)))
-    if recur not in RECUR_LABELS:
-        recur = None
+    """更新任务属性；参数缺省（_UNSET）表示不修改该字段。
+
+    due_ts 变化时重置提醒标记；recur 传 None 表示清除重复。
+    """
+    sets: list[str] = []
+    params: list[object] = []
     with db() as conn:
         old = conn.execute(
-            "SELECT due_ts FROM memos WHERE id = ?", (memo_id,)
+            "SELECT due_ts, remind_advance FROM memos WHERE id = ?", (memo_id,)
         ).fetchone()
-        reset = 1 if old is not None and old["due_ts"] != due_ts else 0
+        old_due = old["due_ts"] if old is not None else None
+        old_adv = (old["remind_advance"] or 0) if old is not None else 0
+        new_due = due_ts if due_ts is not _UNSET else old_due
+
+        # 提醒时刻 = due - advance：due 或 advance 变化都要重置 notified
+        adv_changed = (
+            remind_advance is not _UNSET
+            and new_due is not None
+            and min(7 * 1440, max(0, int(remind_advance))) != old_adv
+        )
+        if due_ts is not _UNSET or adv_changed:
+            due_changed = due_ts is not _UNSET and old_due != due_ts
+            sets.append("notified = notified * ?")
+            params.append(0 if (due_changed or adv_changed) else 1)
+        if due_ts is not _UNSET:
+            sets.append("due_ts = ?")
+            params.append(due_ts)
+        if priority is not _UNSET:
+            sets.append("priority = ?")
+            params.append(max(0, min(3, int(priority))))
+        if new_due is None:
+            # 不变量：recur/remind_advance 依赖 due_ts，无截止强制清除
+            sets.append("recur = NULL")
+            sets.append("remind_advance = 0")
+        else:
+            if recur is not _UNSET:
+                sets.append("recur = ?")
+                params.append(recur if recur in RECUR_LABELS else None)
+            if remind_advance is not _UNSET:
+                sets.append("remind_advance = ?")
+                params.append(min(7 * 1440, max(0, int(remind_advance))))
+        if not sets:
+            return
+        sets.append("updated_at = ?")
+        params.extend((now_iso(), memo_id))
         conn.execute(
-            "UPDATE memos SET due_ts = ?, priority = ?, recur = ?, "
-            "notified = notified * ?, updated_at = ? WHERE id = ?",
-            (due_ts, priority, recur, 1 - reset, now_iso(), memo_id),
+            f"UPDATE memos SET {', '.join(sets)} WHERE id = ?", params
         )
 
 
 def memos_due(now_ts: int | None = None) -> list[Memo]:
-    """已到截止时间且未提醒的备忘录（含逾期）。"""
+    """到达提醒时间且未提醒的备忘录（含逾期）。
+
+    提醒时刻 = due_ts - remind_advance 分钟；advance=0 即截止时刻。
+    """
     now_ts = int(time.time()) if now_ts is None else now_ts
     with db() as conn:
         rows = conn.execute(
             "SELECT * FROM memos WHERE deleted_at IS NULL AND is_done = 0 "
-            "AND due_ts IS NOT NULL AND due_ts <= ? AND notified = 0 "
-            "ORDER BY due_ts",
+            "AND due_ts IS NOT NULL AND due_ts - remind_advance * 60 <= ? "
+            "AND notified = 0 ORDER BY due_ts - remind_advance * 60",
             (now_ts,),
         ).fetchall()
     return [Memo.from_row(r) for r in rows]
