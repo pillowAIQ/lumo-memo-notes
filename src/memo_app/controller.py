@@ -411,8 +411,7 @@ class Controller(QObject):
                 QSystemTrayIcon.MessageIcon.Information,
                 5000,
             )
-        if due:
-            self._refresh_badges()
+        self._refresh_badges()  # 顺带刷新逾期标红（含提前提醒已触发的条目）
 
     def _refresh_badges(self) -> None:
         """轻量刷新主列表徽标（逾期变红），不重建列表。"""

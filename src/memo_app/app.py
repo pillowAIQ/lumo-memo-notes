@@ -483,6 +483,20 @@ class MemoItemWidget(QWidget):
         self.del_btn.clicked.connect(lambda: self.win.delete_memo(self.memo.id))
         lay.addWidget(self.del_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        # 任务属性按钮：截止/优先级/重复/提醒
+        self.props_btn = QPushButton("⚙")
+        self.props_btn.setFixedSize(22, 22)
+        self.props_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.props_btn.setFlat(True)
+        self.props_btn.setStyleSheet(
+            "QPushButton { border: none; padding: 0; color: #8f8a80; font-size: 13px; }"
+            "QPushButton:hover { color: #5a7fb5; }"
+        )
+        self.props_btn.clicked.connect(
+            lambda: self.win.edit_task_props(self.memo.id)
+        )
+        lay.addWidget(self.props_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         # 回收站模式：显示"恢复"按钮
         self.restore_btn = QPushButton("↩")
         self.restore_btn.setFixedSize(22, 22)
@@ -559,6 +573,7 @@ class MemoItemWidget(QWidget):
         trash = self.win.trash_mode
         self.done_btn.setVisible(not trash)
         self.del_btn.setVisible(not trash)
+        self.props_btn.setVisible(not trash)
         self.restore_btn.setVisible(trash)
         QTimer.singleShot(0, self, self._update_height)
 
@@ -760,7 +775,7 @@ class MainWindow(QMainWindow):
 
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("mainInput")
-        self.input_edit.setPlaceholderText("想记点什么？回车保存 · 明天9点 设截止 · 双击条目可编辑")
+        self.input_edit.setPlaceholderText("想记点什么？回车保存 · 明天9点 设截止 · !高 @每周 提前30分钟 · 双击可编辑")
         maincol.addWidget(self.input_edit)
 
         # 回收站横幅：仅回收站模式显示（返回 + 计数 + 清空）
@@ -915,8 +930,14 @@ class MainWindow(QMainWindow):
             return
         dlg = TaskPropsDialog(memo, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            due_ts, priority, recur = dlg.result_props()
-            db.set_task_props(memo_id, due_ts=due_ts, priority=priority, recur=recur)
+            due_ts, priority, recur, advance = dlg.result_props()
+            db.set_task_props(
+                memo_id,
+                due_ts=due_ts,
+                priority=priority,
+                recur=recur,
+                remind_advance=advance,
+            )
             self.reload()
 
     # ---------- 搜索 / 回收站 / 设置 ----------
@@ -1030,12 +1051,18 @@ class MainWindow(QMainWindow):
         text = text.strip()
         if not text:
             return None
-        # NLP 时间识别："明天9点开会" -> 截止时间 + 清理后文本
-        due_ts, cleaned = nlp_time.parse_due(text)
+        # NLP 解析："明天9点开会 !高 @每周 提前30分钟" -> 截止/优先级/重复/提醒
+        due_ts, priority, recur, advance, cleaned = nlp_time.parse_task(text)
         if cleaned.strip():
             text = cleaned.strip()
         try:
-            mid = db.add_memo(text, due_ts=due_ts)
+            mid = db.add_memo(
+                text,
+                due_ts=due_ts,
+                priority=priority,
+                recur=recur,
+                remind_advance=advance,
+            )
         except sqlite3.Error:
             return None
         if cat_ids:
@@ -1081,23 +1108,25 @@ class MainWindow(QMainWindow):
         self.reload()
 
     def edit_memo(self, memo_id: int, text: str) -> None:
-        # 编辑时同样识别时间表达式："明天9点开会" -> 更新截止
-        due_ts, cleaned = nlp_time.parse_due(text)
+        # 编辑时同样解析时间/标记；只更新识别到的字段，不清空既有属性
+        due_ts, priority, recur, advance, cleaned = nlp_time.parse_task(text)
         if cleaned.strip():
             text = cleaned.strip()
         try:
             db.update_content(memo_id, text)
         except (ValueError, sqlite3.Error):
             return
+        props = {}
         if due_ts is not None:
-            memo = next((m for m in self._memos if m.id == memo_id), None)
-            if memo is not None:
-                db.set_task_props(
-                    memo_id,
-                    due_ts=due_ts,
-                    priority=memo.priority,
-                    recur=memo.recur,
-                )
+            props["due_ts"] = due_ts
+        if priority:
+            props["priority"] = priority
+        if recur is not None:
+            props["recur"] = recur
+        if advance:
+            props["remind_advance"] = advance
+        if props:
+            db.set_task_props(memo_id, **props)
         self.reload()
 
     def purge_memo(self, memo_id: int) -> None:
