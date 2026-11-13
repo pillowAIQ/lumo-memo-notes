@@ -369,6 +369,15 @@ def save_batch(
     return int(row["id"])
 
 
+def has_unpublished(conn: sqlite3.Connection, writer_id: str) -> bool:
+    """是否存在已打包未发布的批次（轻量 EXISTS，不取 blob）。"""
+    return conn.execute(
+        "SELECT 1 FROM sync_batches WHERE writer_id = ?"
+        " AND published = 0 LIMIT 1",
+        (writer_id,),
+    ).fetchone() is not None
+
+
 def unpublished_batches(conn: sqlite3.Connection, writer_id: str) -> list:
     return conn.execute(
         "SELECT id, batch_seq, blob, outbox_seqs FROM sync_batches"
@@ -483,6 +492,14 @@ def profile_vault_id(conn: sqlite3.Connection) -> str | None:
         "SELECT vault_id FROM sync_profile WHERE id = 1"
     ).fetchone()
     return row["vault_id"] if row and row["vault_id"] else None
+
+
+def set_profile_vault_id(conn: sqlite3.Connection, vault_id: str) -> None:
+    """绑定本机数据库到 vault（创建/加入成功后调用）。"""
+    conn.execute(
+        "UPDATE sync_profile SET vault_id = ? WHERE id = 1",
+        (vault_id.lower(),),
+    )
 
 
 # ---------- 首次同步回填 / 跨 writer 分类依赖 ----------

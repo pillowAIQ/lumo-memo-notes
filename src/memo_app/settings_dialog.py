@@ -1,14 +1,18 @@
-"""设置对话框：目前只有呼出快捷键可配置。"""
+"""设置对话框：呼出快捷键 + 坚果云同步配置。"""
 from __future__ import annotations
+
+import uuid as uuidlib
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
 )
 
@@ -51,6 +55,8 @@ class SettingsDialog(QDialog):
         self.tip.setObjectName("dialogHint")
         self.tip.setWordWrap(True)
         lay.addWidget(self.tip)
+
+        self._build_sync_section(lay)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -96,9 +102,166 @@ class SettingsDialog(QDialog):
             self.record_btn.setChecked(False)
             self._on_record_toggled(False)
 
+    # ---------- 同步设置 ----------
+
+    def _build_sync_section(self, lay) -> None:
+        svc = self.ctl.sync
+        sep = QLabel("同步（坚果云 WebDAV + 端到端加密）")
+        sep.setObjectName("dialogTitle")
+        lay.addWidget(sep)
+
+        self.sync_enabled = QCheckBox("启用多设备同步")
+        self.sync_enabled.setChecked(svc.enabled)
+        lay.addWidget(self.sync_enabled)
+
+        def _row(label, widget):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(QLabel(label))
+            row.addWidget(widget, 1)
+            lay.addLayout(row)
+            return row
+
+        self.sync_url = QLineEdit(svc.base_url)
+        self.sync_url.setPlaceholderText("https://dav.jianguoyun.com/dav/")
+        _row("服务器地址", self.sync_url)
+
+        self.sync_account = QLineEdit()
+        self.sync_account.setPlaceholderText("坚果云账号（邮箱）")
+        _row("账号", self.sync_account)
+
+        self.sync_app_pw = QLineEdit()
+        self.sync_app_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sync_app_pw.setPlaceholderText("第三方应用密码（留空=不修改）")
+        _row("应用密码", self.sync_app_pw)
+
+        vault_row = QHBoxLayout()
+        vault_row.setSpacing(8)
+        self.vault_new = QRadioButton("新建同步库")
+        self.vault_join = QRadioButton("加入已有同步库")
+        self.vault_new.setChecked(True)
+        vault_row.addWidget(self.vault_new)
+        vault_row.addWidget(self.vault_join)
+        vault_row.addStretch(1)
+        lay.addLayout(vault_row)
+
+        self.vault_id_edit = QLineEdit()
+        self.vault_id_edit.setPlaceholderText(
+            "同步库 ID（加入模式必填，对方设备可在此复制）"
+        )
+        self.vault_id_edit.setEnabled(False)
+        _row("同步库 ID", self.vault_id_edit)
+        self.vault_join.toggled.connect(
+            lambda on: self.vault_id_edit.setEnabled(on)
+        )
+
+        self.vault_pw = QLineEdit()
+        self.vault_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self.vault_pw.setPlaceholderText("同步库密码（加密密钥，务必牢记）")
+        _row("同步库密码", self.vault_pw)
+
+        sync_btn_row = QHBoxLayout()
+        self.sync_now_btn = QPushButton("立即同步")
+        self.sync_now_btn.clicked.connect(svc.sync_now)
+        sync_btn_row.addWidget(self.sync_now_btn)
+        sync_btn_row.addStretch(1)
+        lay.addLayout(sync_btn_row)
+
+        self.sync_status = QLabel(svc.status_text)
+        self.sync_status.setObjectName("dialogHint")
+        self.sync_status.setWordWrap(True)
+        lay.addWidget(self.sync_status)
+        svc.status_changed.connect(self.sync_status.setText)
+
+        cur_vid = svc.vault_id()
+        if cur_vid:
+            self.vault_id_edit.setText(cur_vid)
+            self.vault_join.setChecked(True)
+
+        try:
+            from .sync import credentials
+            acc, _pw = credentials.load_credentials() or (None, None)
+        except Exception:
+            acc = None
+        if acc:
+            self.sync_account.setText(acc)
+
+        hint = QLabel(
+            "首次使用：选「新建同步库」设好密码保存；另一台设备选"
+            "「加入已有同步库」并填入相同的库 ID 和库密码。"
+            "库密码遗忘则无法找回加密数据。"
+        )
+        hint.setObjectName("dialogHint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
     def _on_save(self) -> None:
         if not self.ctl.set_hotkey(self.hotkey_edit.text()):
             self.tip.setText("快捷键格式无法识别，请重新录制（需修饰键+普通键）")
             self.tip.setStyleSheet("color: #d64541; font-size: 11px;")
             return
+        self._save_sync()
         self.accept()
+
+    def _save_sync(self) -> None:
+        svc = self.ctl.sync
+        account = self.sync_account.text().strip()
+        app_pw = self.sync_app_pw.text()
+        vault_pw = self.vault_pw.text()
+        enabled = self.sync_enabled.isChecked()
+
+        # 凭据完整性：启用时账号必填；库密码由建库/加入流程验证后
+        # 才落 keyring（留空=本次不做建库/加入）
+        vid = ""
+        bound_vid = svc.vault_id()
+        if enabled:
+            if not account:
+                self.sync_status.setText("错误：请填写坚果云账号")
+                return
+            if vault_pw and len(vault_pw) < 6:
+                self.sync_status.setText("错误：同步库密码至少 6 位")
+                return
+            wants_setup = bool(vault_pw)
+            if self.vault_join.isChecked():
+                vid = self.vault_id_edit.text().strip().lower()
+                try:
+                    uuidlib.UUID(vid)
+                except ValueError:
+                    self.sync_status.setText("错误：同步库 ID 格式不正确")
+                    return
+                vid = str(uuidlib.UUID(vid))  # 规范化格式
+                if bound_vid and bound_vid != vid:
+                    self.sync_status.setText(
+                        f"错误：本机已绑定同步库 {bound_vid[:8]}…，"
+                        "不能静默切换到其他库"
+                    )
+                    return
+            elif wants_setup:
+                if bound_vid:
+                    self.sync_status.setText(
+                        "错误：本机已绑定同步库，不要重复新建；"
+                        "如需换库请先备份数据"
+                    )
+                    return
+                vid = str(uuidlib.uuid4())  # 新建库：生成 vault_id
+            elif self.vault_id_edit.text().strip() and not bound_vid:
+                # 填了库 ID 但没填库密码：加入不完整，不能静默降级
+                self.sync_status.setText(
+                    "错误：加入已有同步库需要填写同步库密码"
+                )
+                return
+
+        if not svc.save_config(
+            enabled=enabled,
+            base_url=self.sync_url.text().strip()
+            or "https://dav.jianguoyun.com/dav/",
+            account=account,
+            app_password=app_pw,
+        ):
+            return  # 凭据保存失败，状态栏已提示
+        if enabled and vid and vault_pw:
+            # 建库/加入（网络在工作线程；成功后才保存库密码）
+            mode = "join" if self.vault_join.isChecked() else "create"
+            svc.queue_setup(mode, vid, vault_pw)
+        elif enabled:
+            svc.sync_now()

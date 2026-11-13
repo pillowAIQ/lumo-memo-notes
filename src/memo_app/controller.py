@@ -211,6 +211,15 @@ class Controller(QObject):
         self.win.memos_changed.connect(self.widget.reload)
         self.widget.reload()
 
+        # 多设备同步服务（网络全在工作线程，GUI 只收状态信号）
+        from .sync.service import SyncService
+        self.sync = SyncService(self)
+        self.win.memos_changed.connect(self.sync.notify_change)
+        # 远端数据应用后刷新主界面/挂件；编辑中的条目延迟到编辑结束
+        self.sync.synced.connect(self.widget.reload)
+        self.sync.synced.connect(self._on_synced_refresh)
+        QApplication.instance().aboutToQuit.connect(self.sync.shutdown)
+
         # 截止提醒：每 30s 扫一次已到期未提醒的备忘录
         self._remind_timer = QTimer(self)
         self._remind_timer.setInterval(30_000)
@@ -455,6 +464,25 @@ class Controller(QObject):
                 w.badges_label.setText(w._badges_html())
                 w.badges_label.setVisible(bool(w.badges_label.text()))
                 QTimer.singleShot(0, w, w._update_height)
+
+    def _on_synced_refresh(self) -> None:
+        """同步应用了远端数据：若有条目正在编辑则延迟刷新，
+        避免 reload 销毁编辑中的控件丢失未保存文本。"""
+        if self._win_editing():
+            QTimer.singleShot(3000, self, self._on_synced_refresh)
+            return
+        self.win.reload()
+
+    def _win_editing(self) -> bool:
+        try:
+            lst = self.win.list
+        except Exception:
+            return False
+        for i in range(lst.count()):
+            w = lst.itemWidget(lst.item(i))
+            if w is not None and getattr(w, "_editing", False):
+                return True
+        return False
 
     def show_main(self) -> None:
         self.widget.hide()
