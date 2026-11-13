@@ -187,7 +187,8 @@ def list_memos(*, trash: bool = False, query: str = "") -> list[Memo]:
     sql = (
         "SELECT * FROM memos WHERE "
         + " AND ".join(clauses)
-        + " ORDER BY is_pinned DESC, is_done ASC, created_at DESC, id DESC"
+        + " ORDER BY is_pinned DESC, priority DESC, is_done ASC,"
+        + " created_at DESC, id DESC"
     )
     with db() as conn:
         return [Memo.from_row(r) for r in conn.execute(sql, params)]

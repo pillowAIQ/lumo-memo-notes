@@ -166,6 +166,14 @@ QWidget#memoItem[selected="true"] {
     border-color: #d96c3f88;
     background: #fffaf4;
 }
+QWidget#memoItem[prioHigh="true"] {
+    background: #fdf3ef;
+    border-color: #eec9bc;
+}
+QWidget#memoItem[selected="true"][prioHigh="true"] {
+    border-color: #d96c3f88;
+    background: #fffaf4;
+}
 QLabel#memoContent { font-size: 14px; }
 QLabel#memoTime { font-size: 11px; color: #7d786b; border: none; background: transparent; }
 QLabel#memoPin { font-size: 12px; border: none; background: transparent; }
@@ -553,6 +561,11 @@ class MemoItemWidget(QWidget):
         self.style().polish(self)
 
     def _apply_state(self) -> None:
+        # 高优先级卡片淡红底色提示
+        self.setProperty("prioHigh", "true" if self.memo.priority >= 3 else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
         done = self.memo.is_done
         self.done_btn.setProperty("done", "true" if done else "false")
         self.done_btn.setText("✓" if done else "")
