@@ -272,14 +272,24 @@ class TodoWidget(QWidget):
         btn.clicked.connect(lambda _c=False, i=mid: self.done_toggled.emit(i))
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        label = QLabel(memo.content)
+        # 截止/优先级/重复标记前缀
+        markers = ""
+        if memo.due_ts:
+            markers += "⏰"
+        if memo.priority >= 1:
+            markers += "❗"
+        if memo.recur:
+            markers += "↻"
+        display = (markers + " " if markers else "") + memo.content
+
+        label = QLabel(display)
         label.setObjectName("widgetItem")
         label.setToolTip(memo.content)
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # 单行省略：宽度固定（面板定宽 300，扣除边距/圆圈/间距）
         label.setFixedWidth(300 - 12 * 2 - 18 - 8 - 8)
         fm = label.fontMetrics()
-        label.setText(fm.elidedText(memo.content, Qt.TextElideMode.ElideRight, label.width()))
+        label.setText(fm.elidedText(display, Qt.TextElideMode.ElideRight, label.width()))
         lay.addWidget(label, 1)
 
         # 置顶标记

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from . import db
+from . import nlp_time
 from .capture import QuickCapture
 from .icons import make_icon
 from .widget import TodoWidget
@@ -206,6 +207,13 @@ class Controller(QObject):
         self.win.memos_changed.connect(self.widget.reload)
         self.widget.reload()
 
+        # 截止提醒：每 30s 扫一次已到期未提醒的备忘录
+        self._remind_timer = QTimer(self)
+        self._remind_timer.setInterval(30_000)
+        self._remind_timer.timeout.connect(self._check_reminders)
+        self._remind_timer.start()
+        QTimer.singleShot(3000, self._check_reminders)
+
         # 系统托盘
         self.tray: QSystemTrayIcon | None = None
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -385,6 +393,38 @@ class Controller(QObject):
         elif cat_name:
             # 仅创建分类：备忘录为空时 add_memo_text 不会触发刷新
             self.win.reload()
+
+    def _check_reminders(self) -> None:
+        """扫描到期备忘录，通过系统托盘气泡提醒。"""
+        try:
+            due = db.memos_due()
+        except Exception:
+            return
+        for m in due:
+            if self.tray is None:
+                # 无托盘时无法弹气泡，跳过标记，等托盘可用再提醒
+                continue
+            db.mark_notified(m.id)
+            self.tray.showMessage(
+                "memo 提醒",
+                f"{m.content[:40]}\n{nlp_time.format_due(m.due_ts)}",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+        if due:
+            self._refresh_badges()
+
+    def _refresh_badges(self) -> None:
+        """轻量刷新主列表徽标（逾期变红），不重建列表。"""
+        try:
+            lst = self.win.list
+        except Exception:
+            return
+        for i in range(lst.count()):
+            w = lst.itemWidget(lst.item(i))
+            if w is not None and hasattr(w, "_badges_html"):
+                w.badges_label.setText(w._badges_html())
+                w.badges_label.setVisible(bool(w.badges_label.text()))
 
     def show_main(self) -> None:
         self.win.show()

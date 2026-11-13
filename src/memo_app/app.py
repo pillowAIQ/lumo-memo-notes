@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
 )
 
 from . import db
+from . import nlp_time
 from .category_dialog import CategoryPickerDialog
 from .db import Category, Memo
 from .icons import make_icon
 from .settings_dialog import SettingsDialog
+from .task_dialog import TaskPropsDialog
 
 C_TEXT = "#2b2925"
 C_TEXT_DONE = "#7d786b"
@@ -168,6 +170,7 @@ QLabel#memoContent { font-size: 14px; }
 QLabel#memoTime { font-size: 11px; color: #7d786b; border: none; background: transparent; }
 QLabel#memoPin { font-size: 12px; border: none; background: transparent; }
 QLabel#memoTags { font-size: 10px; color: #7a86c8; border: none; background: transparent; }
+QLabel#memoBadges { font-size: 10px; border: none; background: transparent; }
 
 QListWidget { background: transparent; border: none; outline: none; }
 QListWidget::item { border: none; }
@@ -507,8 +510,13 @@ class MemoItemWidget(QWidget):
         self.tags_label = QLabel()
         self.tags_label.setObjectName("memoTags")
         self.tags_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.badges_label = QLabel()
+        self.badges_label.setObjectName("memoBadges")
+        self.badges_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.badges_label.setWordWrap(True)
         meta.addWidget(self.pin_label)
         meta.addWidget(self.time_label)
+        meta.addWidget(self.badges_label)
         meta.addWidget(self.tags_label)
         lay.addLayout(meta)
 
@@ -544,6 +552,10 @@ class MemoItemWidget(QWidget):
         self.tags_label.setText(" ".join(f"#{n}" for n in names))
         self.tags_label.setVisible(bool(names))
 
+        # 截止/优先级/重复徽标
+        self.badges_label.setText(self._badges_html())
+        self.badges_label.setVisible(bool(self.badges_label.text()))
+
         trash = self.win.trash_mode
         self.done_btn.setVisible(not trash)
         self.del_btn.setVisible(not trash)
@@ -567,6 +579,28 @@ class MemoItemWidget(QWidget):
         if abs(h - self.height()) > 1:
             self.setFixedHeight(h)
             self.height_changed.emit(h)
+
+    def _badges_html(self) -> str:
+        """截止/优先级/重复的富文本徽标。"""
+        parts = []
+        m = self.memo
+        now_ts = int(datetime.now().timestamp())
+        if m.due_ts:
+            overdue = m.due_ts < now_ts
+            today = datetime.now().date() == datetime.fromtimestamp(m.due_ts).date()
+            color = "#d64541" if overdue else ("#b8860b" if today else "#7d786b")
+            prefix = "已逾期 " if overdue else "⏰ "
+            parts.append(
+                f'<span style="color:{color}">{prefix}{nlp_time.format_due(m.due_ts)}</span>'
+            )
+        if 0 < m.priority <= 3:
+            pcolor = {1: "#7d786b", 2: "#b8860b", 3: "#d64541"}[m.priority]
+            parts.append(
+                f'<span style="color:{pcolor}">❗{db.PRIORITY_LABELS[m.priority]}</span>'
+            )
+        if m.recur:
+            parts.append(f'<span style="color:#7d786b">↻{db.RECUR_LABELS.get(m.recur, m.recur)}</span>')
+        return " ".join(parts)
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
@@ -630,6 +664,7 @@ class MemoItemWidget(QWidget):
                 lambda: self.win.toggle_done(self.memo.id),
             )
             m.addAction("分类…", lambda: self.win.assign_categories(self.memo.id))
+            m.addAction("任务属性…", lambda: self.win.edit_task_props(self.memo.id))
             m.addAction("复制", lambda: QApplication.clipboard().setText(self.full_text))
             m.addSeparator()
             m.addAction("删除", lambda: self.win.delete_memo(self.memo.id))
@@ -725,7 +760,7 @@ class MainWindow(QMainWindow):
 
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("mainInput")
-        self.input_edit.setPlaceholderText("想记点什么？回车保存 · 双击条目可编辑")
+        self.input_edit.setPlaceholderText("想记点什么？回车保存 · 明天9点 设截止 · 双击条目可编辑")
         maincol.addWidget(self.input_edit)
 
         # 回收站横幅：仅回收站模式显示（返回 + 计数 + 清空）
@@ -874,6 +909,16 @@ class MainWindow(QMainWindow):
             db.set_memo_categories(memo_id, list(dlg.selected_ids()))
             self.reload()
 
+    def edit_task_props(self, memo_id: int) -> None:
+        memo = next((m for m in self._memos if m.id == memo_id), None)
+        if memo is None:
+            return
+        dlg = TaskPropsDialog(memo, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            due_ts, priority, recur = dlg.result_props()
+            db.set_task_props(memo_id, due_ts=due_ts, priority=priority, recur=recur)
+            self.reload()
+
     # ---------- 搜索 / 回收站 / 设置 ----------
 
     def _toggle_search(self, on: bool) -> None:
@@ -985,8 +1030,12 @@ class MainWindow(QMainWindow):
         text = text.strip()
         if not text:
             return None
+        # NLP 时间识别："明天9点开会" -> 截止时间 + 清理后文本
+        due_ts, cleaned = nlp_time.parse_due(text)
+        if cleaned.strip():
+            text = cleaned.strip()
         try:
-            mid = db.add_memo(text)
+            mid = db.add_memo(text, due_ts=due_ts)
         except sqlite3.Error:
             return None
         if cat_ids:
@@ -1032,10 +1081,23 @@ class MainWindow(QMainWindow):
         self.reload()
 
     def edit_memo(self, memo_id: int, text: str) -> None:
+        # 编辑时同样识别时间表达式："明天9点开会" -> 更新截止
+        due_ts, cleaned = nlp_time.parse_due(text)
+        if cleaned.strip():
+            text = cleaned.strip()
         try:
             db.update_content(memo_id, text)
         except (ValueError, sqlite3.Error):
             return
+        if due_ts is not None:
+            memo = next((m for m in self._memos if m.id == memo_id), None)
+            if memo is not None:
+                db.set_task_props(
+                    memo_id,
+                    due_ts=due_ts,
+                    priority=memo.priority,
+                    recur=memo.recur,
+                )
         self.reload()
 
     def purge_memo(self, memo_id: int) -> None:
