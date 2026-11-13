@@ -16,9 +16,10 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PySide6.QtWidgets import QApplication, QListWidget, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QListWidget, QLineEdit, QVBoxLayout, QWidget
 
 from . import db
+from .icons import ui_icon
 
 
 class QuickCapture(QWidget):
@@ -34,7 +35,7 @@ class QuickCapture(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(560, 68)
+        self.setFixedSize(600, 106)
         self.setObjectName("capture")
         self.setStyleSheet(
             """
@@ -43,22 +44,36 @@ class QuickCapture(QWidget):
                 border: none;
                 background: transparent;
                 font-size: 16px;
-                padding: 0 20px;
-                color: #2b2925;
+                padding: 0;
+                color: #283D35;
             }
-            QLineEdit::placeholder { color: #a8a294; }
+            QLabel { background: transparent; border: none; color: #69766E; font-size: 11px; }
+            QLabel#enterKey { background: #E5ECE0; border-radius: 5px; padding: 5px 9px; color: #2D6550; }
             """
         )
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(20, 14, 20, 12)
+        lay.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        icon = QLabel()
+        icon.setPixmap(ui_icon("note", "#2D6550", 24).pixmap(24, 24))
+        row.addWidget(icon)
         self.edit = QLineEdit()
-        self.edit.setPlaceholderText(
-            "记点什么…  /分类名 归类 · 明天9点 设截止 · !高 @每周 提前30分钟 · Enter 保存 · Esc 关闭"
-        )
+        self.edit.setPlaceholderText("让这一刻的想法，留在这里。")
+        self.edit.setAccessibleName("快捷记录内容")
+        self.edit.setToolTip("/分类名 归类 · 明天9点 设截止 · !高 @每周 提前30分钟")
         self.edit.textChanged.connect(self._refresh_popup)
         self.edit.installEventFilter(self)
-        lay.addWidget(self.edit)
+        row.addWidget(self.edit, 1)
+        key = QLabel("Enter")
+        key.setObjectName("enterKey")
+        row.addWidget(key, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(row, 1)
+        hint = QLabel("/ 分类  ·  自然语言设提醒                       Enter 保存  /  Esc 关闭")
+        hint.setContentsMargins(38, 0, 0, 0)
+        lay.addWidget(hint)
         self.edit.returnPressed.connect(self._submit)
 
         # 分类补全弹窗（独立顶层窗口，不能作为子控件否则被 68px 高度裁剪）
@@ -71,10 +86,10 @@ class QuickCapture(QWidget):
         self.popup.setFixedWidth(self.width())
         self.popup.setMaximumHeight(180)
         self.popup.setStyleSheet(
-            "QListWidget { background: #fffdf9; border: 1px solid #e2ded4;"
+            "QListWidget { background: #FCFCF9; border: 1px solid #DCE2D7;"
             " border-radius: 10px; padding: 4px; }"
-            "QListWidget::item { padding: 7px 12px; border-radius: 6px; color: #3a362e; }"
-            "QListWidget::item:selected { background: #fbeee5; }"
+            "QListWidget::item { padding: 9px 14px; border-radius: 6px; color: #42594B; }"
+            "QListWidget::item:selected { background: #DEE8DB; }"
         )
         self.popup.itemClicked.connect(self._on_popup_click)
         self.popup.hide()
@@ -89,8 +104,8 @@ class QuickCapture(QWidget):
         path.addRoundedRect(
             QRectF(self.rect()).adjusted(0.5, 0.5, -1.0, -1.0), 16, 16
         )
-        p.fillPath(path, QColor(255, 255, 255, 240))
-        p.setPen(QPen(QColor(120, 110, 95, 70), 1.0))
+        p.fillPath(path, QColor(250, 252, 248, 250))
+        p.setPen(QPen(QColor("#BBCBB4"), 1.0))
         p.drawPath(path)
         p.end()
 
@@ -105,9 +120,7 @@ class QuickCapture(QWidget):
     def present(self) -> None:
         self._move_to_top_center()
         self.edit.clear()
-        self.edit.setPlaceholderText(
-            "记点什么…  /分类名 归类 · 明天9点 设截止 · !高 @每周 提前30分钟 · Enter 保存 · Esc 关闭"
-        )
+        self.edit.setPlaceholderText("让这一刻的想法，留在这里。")
         self.popup.hide()
         self.show()
         self.raise_()
@@ -233,11 +246,10 @@ class QuickCapture(QWidget):
         return super().eventFilter(obj, e)
 
     def _hide_if_unfocused(self) -> None:
-        if not self.isVisible():
+        if not self.isVisible() or self.edit.hasFocus():
             return
         fw = QApplication.focusWidget()
         if fw is not None and self.popup.isAncestorOf(fw):
             return  # 焦点在分类弹窗内，保持呼出
         self.popup.hide()
-        if not self.edit.hasFocus():
-            self.hide()
+        self.hide()

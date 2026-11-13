@@ -13,12 +13,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from . import db, nlp_time
 from .db import Memo
+from .icons import ui_icon
 
 MAX_ROWS = 8
 GROUP_MAX_ROWS = 6
@@ -33,27 +35,48 @@ class GroupHeader(QWidget):
         super().__init__()
         self.key = key
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(24)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title)
+        self.setFixedHeight(30)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(5)
 
-        self.arrow = QLabel("▾" if expanded else "▸")
+        self.arrow = QLabel()
+        self.arrow.setPixmap(ui_icon("chevron_down" if expanded else "chevron_right", "#D3DCCB", 12).pixmap(12, 12))
         self.arrow.setObjectName("widgetGroupArrow")
-        name = QLabel(title)
-        name.setObjectName("widgetGroupName")
+        self.full_title = title
+        self.name = QLabel(title)
+        self.name.setTextFormat(Qt.TextFormat.PlainText)
+        self.name.setMinimumWidth(0)
+        self.name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.name.setObjectName("widgetGroupName")
+        self.setToolTip(title)
         cnt = QLabel(str(count))
         cnt.setObjectName("widgetGroupCount")
-        for w in (self.arrow, name, cnt):
+        for w in (self.arrow, self.name, cnt):
             w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay.addWidget(self.arrow)
-        lay.addWidget(name, 1)
+        lay.addWidget(self.name, 1)
         lay.addWidget(cnt)
 
     def set_state(self, expanded: bool, count: int) -> None:
-        self.arrow.setText("▾" if expanded else "▸")
+        self.arrow.setPixmap(ui_icon("chevron_down" if expanded else "chevron_right", "#D3DCCB", 12).pixmap(12, 12))
         # 右侧计数在 layout 最后一个 widget
         self.layout().itemAt(self.layout().count() - 1).widget().setText(str(count))
+
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self.name.setText(self.name.fontMetrics().elidedText(
+            self.full_title, Qt.TextElideMode.ElideRight, self.name.width()
+        ))
+
+    def keyPressEvent(self, e):  # noqa: N802
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.toggled.emit(self.key)
+            return
+        super().keyPressEvent(e)
 
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
@@ -73,11 +96,11 @@ class GroupHeader(QWidget):
 
 
 class TodoWidget(QWidget):
-    """无边框置顶半透明小面板。可拖动，单击空白处打开主界面。"""
+    """无边框置顶半透明小面板。可拖动，双击空白处打开主界面。"""
 
     open_main = Signal()
     done_toggled = Signal(int)  # memo_id
-    visibility_changed = Signal(bool)
+    dismissed = Signal()
 
     def __init__(self) -> None:
         super().__init__(None)
@@ -87,33 +110,40 @@ class TodoWidget(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._minimized = False
         self.setFixedWidth(300)
         self.setObjectName("todoWidget")
         self.setStyleSheet(
             """
             /* 面板背景由 paintEvent 手绘（半透明顶层窗口 QSS 背景不生效） */
-            QLabel#widgetTitle { font-size: 13px; font-weight: bold; color: #f5f5ef; }
-            QLabel#widgetCount { font-size: 11px; color: #9a9a90; }
-            QLabel#widgetItem { font-size: 13px; color: #eeeeea; }
-            QLabel#widgetHint { font-size: 10px; color: #9a9a92; }
-            QLabel#widgetGroupName { font-size: 13px; font-weight: bold; color: #cfccc2; }
-            QLabel#widgetGroupArrow { font-size: 9px; color: #8f8f86; }
-            QLabel#widgetGroupCount { font-size: 10px; color: #8f8f86; }
-            GroupHeader { background: transparent; }
+            QLabel { background: transparent; border: none; }
+            QLabel#widgetTitle { font-size: 14px; font-weight: bold; color: #F4F6EF; }
+            QLabel#widgetCount { font-size: 11px; color: #D3DCCB; }
+            QLabel#widgetItem { font-size: 12px; color: #F0F4EB; }
+            QLabel#widgetMeta { font-size: 11px; color: #D3DCCB; }
+            QLabel#widgetHint { font-size: 10px; color: #D3DCCB; }
+            QLabel#widgetGroupName { font-size: 12px; font-weight: bold; color: #E2EBD9; }
+            QLabel#widgetGroupArrow { font-size: 9px; color: #D3DCCB; }
+            QLabel#widgetGroupCount { font-size: 10px; color: #D3DCCB; }
+            GroupHeader { background: transparent; border: 1px solid transparent; border-radius: 4px; }
+            GroupHeader:focus { background: rgba(209, 224, 196, 24); border-color: #9DB591; }
             QPushButton#widgetBtn {
-                border: none; background: transparent; color: #b8b8ae;
-                font-size: 13px; padding: 0 4px;
+                border: none; background: transparent; color: #D3DCCB;
+                border-radius: 5px; padding: 0;
             }
-            QPushButton#widgetBtn:hover { color: #ffffff; }
+            QPushButton#widgetBtn:hover, QPushButton#widgetBtn:focus { background: rgba(209, 224, 196, 35); }
             QPushButton#widgetDone {
-                border: 1.5px solid rgba(255, 255, 255, 110);
+                border: 1.5px solid #BFCFB2;
                 border-radius: 9px;
                 background: transparent; color: transparent;
                 font-size: 10px; font-weight: bold; padding: 0;
             }
-            QPushButton#widgetDone:hover { border-color: #4ecb8d; color: #4ecb8d; }
+            QPushButton#widgetDone:hover, QPushButton#widgetDone:focus {
+                border-color: #A7CE99; background: rgba(145, 186, 134, 35);
+            }
             QPushButton#widgetDone[done="true"] {
-                background: #2f9e63; border-color: #2f9e63; color: white;
+                background: #2D6550; border-color: #2D6550; color: white;
             }
             """
         )
@@ -136,12 +166,12 @@ class TodoWidget(QWidget):
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 8, 12, 8)
-        root.setSpacing(4)
+        root.setContentsMargins(16, 14, 16, 12)
+        root.setSpacing(8)
 
         header = QHBoxLayout()
         header.setSpacing(6)
-        self.title_label = QLabel("待办")
+        self.title_label = QLabel("小小待办")
         self.title_label.setObjectName("widgetTitle")
         self.count_label = QLabel("")
         self.count_label.setObjectName("widgetCount")
@@ -150,22 +180,27 @@ class TodoWidget(QWidget):
         header.addWidget(self.title_label)
         header.addWidget(self.count_label)
         header.addStretch(1)
-        self.open_btn = QPushButton("↗")
-        self.open_btn.setObjectName("widgetBtn")
-        self.open_btn.setFixedSize(22, 22)
-        self.open_btn.setToolTip("打开主界面")
-        self.hide_btn = QPushButton("×")
+        self.min_btn = QPushButton()
+        self.min_btn.setIcon(ui_icon("minus", "#D3DCCB", 14))
+        self.min_btn.setObjectName("widgetBtn")
+        self.min_btn.setFixedSize(22, 22)
+        self.min_btn.setAccessibleName("最小化桌面挂件")
+        self.min_btn.setToolTip("最小化为标题栏")
+        self.hide_btn = QPushButton()
+        self.hide_btn.setIcon(ui_icon("close", "#D3DCCB", 14))
+        self.hide_btn.setAccessibleName("隐藏桌面挂件")
         self.hide_btn.setObjectName("widgetBtn")
         self.hide_btn.setFixedSize(22, 22)
         self.hide_btn.setToolTip("隐藏挂件（托盘菜单可再打开）")
-        header.addWidget(self.open_btn)
+        header.addWidget(self.min_btn)
         header.addWidget(self.hide_btn)
         root.addLayout(header)
 
-        self.list_host = QVBoxLayout()
+        self.list_panel = QWidget()
+        self.list_host = QVBoxLayout(self.list_panel)
         self.list_host.setSpacing(2)
         self.list_host.setContentsMargins(0, 2, 0, 0)
-        root.addLayout(self.list_host)
+        root.addWidget(self.list_panel)
 
         self.more_label = QLabel("")
         self.more_label.setObjectName("widgetHint")
@@ -178,8 +213,26 @@ class TodoWidget(QWidget):
         self.hint_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         root.addWidget(self.hint_label)
 
-        self.open_btn.clicked.connect(self.open_main)
-        self.hide_btn.clicked.connect(self.hide)
+        self.min_btn.clicked.connect(self._toggle_minimized)
+        self.hide_btn.clicked.connect(self._dismiss)
+        for button in (self.min_btn, self.hide_btn):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _toggle_minimized(self) -> None:
+        self._minimized = not self._minimized
+        self.list_panel.setVisible(not self._minimized)
+        self.hint_label.setVisible(not self._minimized)
+        self.min_btn.setIcon(ui_icon(
+            "restore_window" if self._minimized else "minus", "#D3DCCB", 14
+        ))
+        self.min_btn.setAccessibleName("还原桌面挂件" if self._minimized else "最小化桌面挂件")
+        self.min_btn.setToolTip("还原待办列表" if self._minimized else "最小化为标题栏")
+        self._resize_timer.stop()
+        self.adjustSize()
+
+    def _dismiss(self) -> None:
+        self.hide()
+        self.dismissed.emit()
 
     # ---------- 数据 ----------
 
@@ -201,7 +254,7 @@ class TodoWidget(QWidget):
         cat_map = db.memo_category_map()
 
         def group_key(m: Memo) -> str:
-            cids = cat_map.get(m.id, set())
+            cids = cat_map.get(m.id, set()) & cats.keys()
             return str(sorted(cids)[0]) if cids else "0"
 
         groups: dict[str, list[Memo]] = {}
@@ -211,8 +264,7 @@ class TodoWidget(QWidget):
 
         for key in ordered:
             memos = groups[key]
-            title = "未分类" if key == "0" else cats.get(int(key), None)
-            title = title.name if hasattr(title, "name") else str(title)
+            title = "未分类" if key == "0" else cats[int(key)].name
             expanded = key in self._expanded
             hdr = GroupHeader(key, title, len(memos), expanded)
             hdr.toggled.connect(self._toggle_group)
@@ -264,50 +316,65 @@ class TodoWidget(QWidget):
         lay.setContentsMargins(0, 3, 0, 3)
         lay.setSpacing(8)
 
-        btn = QPushButton("○")
+        btn = QPushButton()
         btn.setObjectName("widgetDone")
         btn.setFixedSize(18, 18)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setAccessibleName("标记完成")
+        btn.setToolTip("标记完成")
         mid = memo.id
         btn.clicked.connect(lambda _c=False, i=mid: self.done_toggled.emit(i))
-        lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
 
-        # 截止/优先级/重复标记前缀（截止带具体时间）
-        markers = ""
+        markers = []
         tip_parts = []
         if memo.due_ts:
             due_str = nlp_time.format_due(memo.due_ts)
-            markers += f"⏰{due_str} "
+            markers.append(due_str)
             tip_parts.append(due_str)
             if memo.remind_advance:
                 tip_parts.append(f"提前{memo.remind_advance}分钟提醒")
         if memo.priority >= 1:
-            markers += "❗ "
+            markers.append(f"{db.PRIORITY_LABELS.get(memo.priority, '')}优先级")
             tip_parts.append(f"优先级{db.PRIORITY_LABELS.get(memo.priority, '')}")
         if memo.recur:
-            markers += "↻ "
+            markers.append(db.RECUR_LABELS.get(memo.recur, "重复"))
             tip_parts.append(f"重复{db.RECUR_LABELS.get(memo.recur, '')}")
-        display = markers + memo.content
         # label 对鼠标透明，tooltip 需挂到 row 才能触发
         row.setToolTip(
             memo.content + ("\n" + " · ".join(tip_parts) if tip_parts else "")
         )
 
-        label = QLabel(display)
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(3)
+        label = QLabel(memo.content)
+        label.setTextFormat(Qt.TextFormat.PlainText)
         label.setObjectName("widgetItem")
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # 单行省略：宽度固定（面板定宽 300，扣除边距/圆圈/间距）
-        label.setFixedWidth(300 - 12 * 2 - 18 - 8 - 8)
+        label.setFixedWidth(300 - 16 * 2 - 18 - 8 - 24)
         fm = label.fontMetrics()
-        label.setText(fm.elidedText(display, Qt.TextElideMode.ElideRight, label.width()))
-        lay.addWidget(label, 1)
+        label.setText(fm.elidedText(memo.content, Qt.TextElideMode.ElideRight, label.width()))
+        text_col.addWidget(label)
+        if markers:
+            metadata = QLabel()
+            metadata.setObjectName("widgetMeta")
+            metadata.setTextFormat(Qt.TextFormat.PlainText)
+            metadata.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            metadata.setFixedWidth(label.width())
+            metadata.setText(metadata.fontMetrics().elidedText(
+                " · ".join(markers), Qt.TextElideMode.ElideRight, metadata.width()
+            ))
+            text_col.addWidget(metadata)
+        lay.addLayout(text_col, 1)
 
         # 置顶标记
         if memo.is_pinned:
-            pin = QLabel("📌")
-            pin.setStyleSheet("font-size: 10px;")
+            pin = QLabel()
+            pin.setPixmap(ui_icon("pin", "#E8C997", 12).pixmap(12, 12))
             pin.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            lay.addWidget(pin, 0, Qt.AlignmentFlag.AlignVCenter)
+            lay.addWidget(pin, 0, Qt.AlignmentFlag.AlignTop)
 
         return row
 
@@ -324,7 +391,7 @@ class TodoWidget(QWidget):
     # ---------- 绘制 / 显隐 ----------
 
     def paintEvent(self, e):  # noqa: N802
-        """手绘圆角半透明深色面板（QSS 背景在半透明顶层窗口上不生效）。"""
+        """Keep the original background translucency without fading the text."""
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
@@ -332,17 +399,9 @@ class TodoWidget(QWidget):
             QRectF(self.rect()).adjusted(0.5, 0.5, -1.0, -1.0), 16, 16
         )
         p.fillPath(path, QColor(38, 38, 44, 190))
-        p.setPen(QPen(QColor(255, 255, 255, 45), 1.0))
+        p.setPen(QPen(QColor(222, 232, 216, 60), 1.0))
         p.drawPath(path)
         p.end()
-
-    def showEvent(self, e):  # noqa: N802
-        super().showEvent(e)
-        self.visibility_changed.emit(True)
-
-    def hideEvent(self, e):  # noqa: N802
-        super().hideEvent(e)
-        self.visibility_changed.emit(False)
 
     # ---------- 拖动 ----------
 

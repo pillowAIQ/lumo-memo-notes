@@ -19,10 +19,18 @@ class SettingsDialog(QDialog):
         self.ctl = controller
         self._recording = False
         self.setWindowTitle("设置")
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(480)
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(12)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(18)
+        heading = QLabel("随时，记下你的想法")
+        heading.setObjectName("dialogTitle")
+        hint = QLabel("设置一个顺手的快捷键，在任何应用中呼出快捷记录。")
+        hint.setObjectName("dialogHint")
+        hint.setWordWrap(True)
+        lay.addWidget(heading)
+        lay.addWidget(hint)
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -40,7 +48,7 @@ class SettingsDialog(QDialog):
             "点击录制后按下组合键（需含 Ctrl/Shift/Alt/Win + 一个键）；"
             "也可直接在输入框手动输入，如 Ctrl+P"
         )
-        self.tip.setStyleSheet("color: #8b877b; font-size: 11px;")
+        self.tip.setObjectName("dialogHint")
         self.tip.setWordWrap(True)
         lay.addWidget(self.tip)
 
@@ -50,6 +58,8 @@ class SettingsDialog(QDialog):
         )
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         lay.addWidget(buttons)
 
         self.record_btn.toggled.connect(self._on_record_toggled)

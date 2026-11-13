@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QLabel,
     QVBoxLayout,
     QWidget,
 )
@@ -25,10 +26,18 @@ class TaskPropsDialog(QDialog):
     def __init__(self, memo: Memo, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("任务属性")
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(420)
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(12)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(18)
+        heading = QLabel("让计划井井有条")
+        heading.setObjectName("dialogTitle")
+        hint = QLabel("设置截止时间、优先级和提醒，把重要的事放在心上。")
+        hint.setObjectName("dialogHint")
+        hint.setWordWrap(True)
+        lay.addWidget(heading)
+        lay.addWidget(hint)
         form = QFormLayout()
         form.setSpacing(10)
         lay.addLayout(form)
@@ -98,6 +107,8 @@ class TaskPropsDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         lay.addWidget(buttons)
 
     def _due_widget(self) -> QWidget:

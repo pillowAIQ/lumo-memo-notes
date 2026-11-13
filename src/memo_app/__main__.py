@@ -32,6 +32,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("memo")
     app.setOrganizationName("memo_app")
+    app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyleSheet(QSS)  # 全局样式：对话框/菜单/控件统一美化
 
