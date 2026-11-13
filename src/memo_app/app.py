@@ -226,6 +226,17 @@ def rel_time(iso: str) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def _fmt_advance(minutes: int) -> str:
+    """提前提醒分钟数的人性化展示：0->空, 60->1小时, 1440->1天。"""
+    if not minutes:
+        return ""
+    if minutes % 1440 == 0:
+        return f"（提前{minutes // 1440}天提醒）"
+    if minutes % 60 == 0:
+        return f"（提前{minutes // 60}小时提醒）"
+    return f"（提前{minutes}分钟提醒）"
+
+
 class _NavButton(QToolButton):
     """导航菜单按钮：点击或悬停展开 QMenu。"""
 
@@ -569,6 +580,7 @@ class MemoItemWidget(QWidget):
         # 截止/优先级/重复徽标
         self.badges_label.setText(self._badges_html())
         self.badges_label.setVisible(bool(self.badges_label.text()))
+        self.badges_label.setToolTip(self._badges_tooltip())
 
         trash = self.win.trash_mode
         self.done_btn.setVisible(not trash)
@@ -616,6 +628,19 @@ class MemoItemWidget(QWidget):
         if m.recur:
             parts.append(f'<span style="color:#7d786b">↻{db.RECUR_LABELS.get(m.recur, m.recur)}</span>')
         return " ".join(parts)
+
+    def _badges_tooltip(self) -> str:
+        """徽标悬停提示：完整截止时间 + 优先级 + 重复 + 提前量。"""
+        m = self.memo
+        tips = []
+        if m.due_ts:
+            exact = datetime.fromtimestamp(m.due_ts).strftime("%Y-%m-%d %H:%M")
+            tips.append(f"截止 {exact}{_fmt_advance(m.remind_advance)}")
+        if 0 < m.priority <= 3:
+            tips.append(f"优先级：{db.PRIORITY_LABELS[m.priority]}")
+        if m.recur:
+            tips.append(f"重复：{db.RECUR_LABELS.get(m.recur, m.recur)}")
+        return "\n".join(tips)
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
