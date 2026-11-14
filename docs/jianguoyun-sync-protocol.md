@@ -71,6 +71,10 @@ op 信封（= `sync_outbox.payload`）：
   跨主机/HTTPS→HTTP 重定向剥离 Authorization；响应体上限。
 - 错误分类：AuthError(401/403)、NotFoundError(404)、RateLimitedError(429+Retry-After)、
   PreconditionFailedError(412)、ServerError(5xx)、QuotaError(507)。
+- 坚果云兼容：父级集合不存在时 GET/PROPFIND 返回 409(AncestorsNotFound)
+  而非 404，transport 统一转为 NotFoundError；MKCOL 对已存在集合
+  返回 409（标准应为 405），经存在性验证后幂等放行。PUT 的 409
+  仍按真实冲突处理，不做转换。
 
 ## 7. 已知限制（v1 有意取舍）
 

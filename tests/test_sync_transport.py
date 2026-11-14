@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 import threading
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -38,7 +39,7 @@ class FakeWebDAV(BaseHTTPRequestHandler):
     def _err_inject(self) -> bool:
         """路径含 /errNNN 时返回对应状态码（测试错误分类）。"""
         p = self._path()
-        for code in (401, 403, 404, 412, 429, 500, 507):
+        for code in (401, 403, 404, 409, 412, 429, 500, 507):
             if f"/err{code}" in p:
                 if code == 429:
                     self.send_response(429)
@@ -235,6 +236,29 @@ class TransportTest(unittest.TestCase):
             c.get("err500/x")
         with self.assertRaises(transport.QuotaError):
             c.get("err507/x")  # 507 配额不足单独归类
+        # PUT 的 409 是真实冲突，绝不能转成 NotFoundError
+        with self.assertRaises(transport.WebDAVError) as cm:
+            c.put("err409/x.enc", b"d")
+        self.assertNotIsInstance(cm.exception, transport.NotFoundError)
+
+    def test_jianguoyun_409_as_notfound(self) -> None:
+        # 坚果云：父级集合不存在时 GET/PROPFIND 返回 409
+        # (AncestorsNotFound) 而非 404——必须按不存在处理
+        c = self._client(self.VID)
+        with self.assertRaises(transport.NotFoundError):
+            c.get("err409/x.enc")
+        with self.assertRaises(transport.NotFoundError):
+            c.propfind("err409/dir")
+        self.assertFalse(c.exists("err409/dir"))
+
+    def test_mkcol_409_tolerated_when_exists(self) -> None:
+        # 坚果云：对已存在集合 MKCOL 返回 409——验证存在则幂等成功；
+        # 集合真不存在时 409 必须原样抛出
+        c = self._client(self.VID)
+        with unittest.mock.patch.object(c, "exists", return_value=True):
+            c.mkcol("err409/col")
+        with self.assertRaises(transport.WebDAVError):
+            c.mkcol("err409/col")
 
     def test_exists_207_404_propstat(self) -> None:
         # 假服务器对不存在对象返回 207+404-propstat，exists 必须判 False

@@ -228,6 +228,10 @@ class WebDAVClient:
                 e.read(4096)
             except Exception:
                 pass
+            # 坚果云兼容：父级集合不存在时 GET/PROPFIND 返回
+            # 409(AncestorsNotFound) 而非标准 404——按不存在处理
+            if e.code == 409 and method in ("GET", "PROPFIND"):
+                raise NotFoundError("not found", e.code) from e
             _raise_for_status(e.code, retry)
             # 3xx/1xx 等 _raise_for_status 未覆盖的码：统一包装为 WebDAVError，
             # 保证所有失败都可被调用方按 WebDAVError 处理
@@ -259,17 +263,44 @@ class WebDAVClient:
                 pass
             if e.code == 405:
                 return
+            if e.code == 409 and self._collection_exists(url):
+                # 坚果云：对已存在集合 MKCOL 返回 409——验证存在则幂等成功
+                return
             _raise_for_status(e.code)
             raise WebDAVError(f"HTTP {e.code}", e.code) from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise WebDAVError(f"network error: {type(e).__name__}") from e
 
+    def _collection_exists(self, url: str) -> bool:
+        """对绝对 URL 做 Depth:0 PROPFIND，判断集合是否存在。"""
+        req = urllib.request.Request(
+            url,
+            method="PROPFIND",
+            data=PROPFIND_PROPS.encode("utf-8"),
+            headers={
+                "Authorization": self._auth,
+                "Depth": "0",
+                "Content-Type": "application/xml; charset=utf-8",
+            },
+        )
+        try:
+            resp = self._opener.open(req, timeout=self.timeout)
+            resp.read(4096)
+            # 合规 PROPFIND 响应是 207 multistatus；其他 2xx 不认
+            return resp.status == 207
+        except urllib.error.HTTPError:
+            return False
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return False
+
     def mkcol(self, rel_path: str) -> None:
-        """创建集合；已存在（405）视为成功。"""
+        """创建集合；已存在（405/坚果云 409）视为成功。"""
         try:
             self._request("MKCOL", rel_path)
         except WebDAVError as e:
             if e.status == 405:
+                return
+            if e.status == 409 and self.exists(rel_path):
                 return
             raise
 

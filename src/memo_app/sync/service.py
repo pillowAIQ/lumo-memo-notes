@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 import uuid
 from datetime import datetime
 
@@ -98,7 +99,12 @@ class _Worker(QObject):
         try:
             self.result.emit(run_job(j))
         except Exception as e:
-            logger.warning("sync job failed: %s", e)
+            # 只记 hostname：base_url 是用户输入，可能内嵌凭据
+            host = urllib.parse.urlsplit(str(j.get("base_url"))).hostname
+            logger.warning(
+                "sync job failed: kind=%s host=%s err=%s",
+                j.get("kind"), host, e,
+            )
             self.result.emit({
                 "ok": False, "kind": j.get("kind"),
                 "error": f"{type(e).__name__}: {e}",
