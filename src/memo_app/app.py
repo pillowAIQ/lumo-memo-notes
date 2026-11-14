@@ -125,6 +125,19 @@ class TitleBar(QWidget):
         self.edit_nav = _NavButton("编辑", edit_menu, self)
         lay.addWidget(self.edit_nav)
 
+        # 多设备同步入口（仿 Obsidian Sync：导航栏一键唤出状态菜单）
+        self.sync_btn = QToolButton()
+        self.sync_btn.setText("同步")
+        self.sync_btn.setIcon(ui_icon("sync", size=14))
+        self.sync_btn.setIconSize(QSize(14, 14))
+        self.sync_btn.setObjectName("navBtn")
+        self.sync_btn.setToolTip("多设备同步")
+        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sync_btn.clicked.connect(
+            lambda: win._open_sync_menu(self.sync_btn)
+        )
+        lay.addWidget(self.sync_btn)
+
         settings_btn = QToolButton()
         settings_btn.setText("设置")
         settings_btn.setObjectName("navBtn")
@@ -1119,6 +1132,46 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         if self.controller is not None:
             SettingsDialog(self.controller, self).exec()
+
+    # ---------- 同步（仿 Obsidian Sync 插件：导航栏状态菜单） ----------
+
+    def _open_sync_menu(self, anchor) -> None:
+        svc = (
+            getattr(self.controller, "sync", None)
+            if self.controller is not None
+            else None
+        )
+        menu = QMenu(self)
+        status = svc.status_text if svc is not None else "同步未就绪"
+        act_status = menu.addAction(status or "未启用")
+        act_status.setEnabled(False)
+        menu.addSeparator()
+        act_sync = menu.addAction("立即同步…")
+        can_sync = bool(
+            svc is not None and svc.enabled and svc.vault_id()
+        )
+        act_sync.setEnabled(can_sync)
+        if can_sync:
+            act_sync.triggered.connect(
+                lambda: self.controller.sync_now_interactive(self)
+            )
+        act_setup = menu.addAction("同步设置…")
+        act_setup.triggered.connect(self._open_settings)
+        menu.exec(anchor.mapToGlobal(QPoint(0, anchor.height())))
+
+    def _on_sync_status(self, text: str) -> None:
+        """同步状态 → 标题栏按钮图标变色 + tooltip。"""
+        btn = getattr(self.titlebar, "sync_btn", None)
+        if btn is None:
+            return
+        btn.setToolTip(text or "多设备同步")
+        if "失败" in text or "错误" in text or "不可用" in text:
+            color = "#d64541"
+        elif "已同步" in text or "就绪" in text:
+            color = "#2D6550"
+        else:
+            color = "#69766E"
+        btn.setIcon(ui_icon("sync", color=color, size=14))
 
     # ---------- 数据 ----------
 

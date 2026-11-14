@@ -160,13 +160,6 @@ class SettingsDialog(QDialog):
         self.vault_pw.setPlaceholderText("同步库密码（加密密钥，务必牢记）")
         _row("同步库密码", self.vault_pw)
 
-        sync_btn_row = QHBoxLayout()
-        self.sync_now_btn = QPushButton("立即同步")
-        self.sync_now_btn.clicked.connect(self._on_sync_now)
-        sync_btn_row.addWidget(self.sync_now_btn)
-        sync_btn_row.addStretch(1)
-        lay.addLayout(sync_btn_row)
-
         self.sync_status = QLabel(svc.status_text)
         self.sync_status.setObjectName("dialogHint")
         self.sync_status.setWordWrap(True)
@@ -194,25 +187,6 @@ class SettingsDialog(QDialog):
         hint.setObjectName("dialogHint")
         hint.setWordWrap(True)
         lay.addWidget(hint)
-
-    def _on_sync_now(self) -> None:
-        """手动同步前让用户选择冲突策略。"""
-        from PySide6.QtWidgets import QMessageBox
-        box = QMessageBox(self)
-        box.setWindowTitle("同步冲突处理")
-        box.setText("两台设备同时修改同一条备忘录时如何处理？")
-        box.setInformativeText(
-            "此选择只影响本次手动同步；后台自动同步默认后写覆盖。"
-        )
-        b_lww = box.addButton("后写覆盖（推荐）", QMessageBox.ButtonRole.AcceptRole)
-        b_keep = box.addButton("保留冲突副本", QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Cancel)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is b_lww:
-            self.ctl.sync.sync_now("lww")
-        elif clicked is b_keep:
-            self.ctl.sync.sync_now("keep")
 
     def _on_save(self) -> None:
         if not self.ctl.set_hotkey(self.hotkey_edit.text()):

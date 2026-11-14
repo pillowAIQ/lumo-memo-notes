@@ -218,6 +218,9 @@ class Controller(QObject):
         # 远端数据应用后刷新主界面/挂件；编辑中的条目延迟到编辑结束
         self.sync.synced.connect(self.widget.reload)
         self.sync.synced.connect(self._on_synced_refresh)
+        # 同步状态 → 标题栏按钮变色/tooltip
+        self.sync.status_changed.connect(self.win._on_sync_status)
+        self.win._on_sync_status(self.sync.status_text)
         QApplication.instance().aboutToQuit.connect(self.sync.shutdown)
 
         # 截止提醒：每 30s 扫一次已到期未提醒的备忘录
@@ -464,6 +467,29 @@ class Controller(QObject):
                 w.badges_label.setText(w._badges_html())
                 w.badges_label.setVisible(bool(w.badges_label.text()))
                 QTimer.singleShot(0, w, w._update_height)
+
+    def sync_now_interactive(self, parent=None) -> None:
+        """手动同步：先让用户选择冲突处理策略（标题栏同步菜单入口）。"""
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(parent)
+        box.setWindowTitle("同步冲突处理")
+        box.setText("两台设备同时修改同一条备忘录时如何处理？")
+        box.setInformativeText(
+            "此选择只影响本次手动同步；后台自动同步默认后写覆盖。"
+        )
+        b_lww = box.addButton(
+            "后写覆盖（推荐）", QMessageBox.ButtonRole.AcceptRole
+        )
+        b_keep = box.addButton(
+            "保留冲突副本", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_lww:
+            self.sync.sync_now("lww")
+        elif clicked is b_keep:
+            self.sync.sync_now("keep")
 
     def _on_synced_refresh(self) -> None:
         """同步应用了远端数据：若有条目正在编辑则延迟刷新，

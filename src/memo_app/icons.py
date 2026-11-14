@@ -34,6 +34,7 @@ _PATHS = {
     "lock": '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     "chevron_down": '<path d="m6 9 6 6 6-6"/>',
     "chevron_right": '<path d="m9 6 6 6-6 6"/>',
+    "sync": '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3v5h-5"/>',
 }
 
 
