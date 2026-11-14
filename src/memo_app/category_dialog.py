@@ -23,11 +23,18 @@ class CategoryPickerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("选择分类")
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(340)
         self._checks: dict[int, QCheckBox] = {}
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(8)
+        lay.setContentsMargins(28, 26, 28, 24)
+        lay.setSpacing(14)
+        heading = QLabel("选择分类")
+        heading.setObjectName("dialogTitle")
+        hint = QLabel("一条备忘录可以放进多个分类。")
+        hint.setObjectName("dialogHint")
+        lay.addWidget(heading)
+        lay.addWidget(hint)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -35,7 +42,7 @@ class CategoryPickerDialog(QDialog):
         scroll.setMaximumHeight(300)
         box = QWidget()
         bl = QVBoxLayout(box)
-        bl.setSpacing(6)
+        bl.setSpacing(10)
         bl.setContentsMargins(0, 0, 4, 0)
         if not categories:
             bl.addWidget(QLabel("还没有分类，先在左侧栏新建一个吧"))
@@ -53,6 +60,8 @@ class CategoryPickerDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("完成")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         lay.addWidget(buttons)
 
     def selected_ids(self) -> set[int]:

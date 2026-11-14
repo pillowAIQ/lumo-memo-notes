@@ -1,0 +1,18 @@
+# AGENTS.md
+
+## Environment
+- Always use `.venv/Scripts/python.exe`; bare `python` is the Windows Store stub.
+
+## Verification
+- UI smoke + screenshots (isolated temp DB, no tray/hotkeys): `.venv/Scripts/python.exe ui_smoke.py` -> `audit_shots/redesign/`
+- Unit tests: `.venv/Scripts/python.exe -m unittest discover -s tests`
+  (sync engine/transport tests use a local fake WebDAV server and are occasionally flaky with WinError 10053)
+
+## UI conventions
+- App display name 轻笺 · Lumo (exe `Lumo.exe`); internal ids stay `memo`/`memo_app` (QSettings, data dir, credentials) — do not rename them.
+- Skins: palettes + QSS template in `src/memo_app/theme.py`; use `theme.c(token)` / `theme.qc(token)` instead of hex literals, and refresh icons on `theme.notifier.changed`.
+- Settings live in `settings_dialog.py` as an in-window `SettingsView` (pages: general/appearance/hotkeys/sync/about), opened via `MainWindow.open_settings(page)`.
+- Palette/QSS: `src/memo_app/theme.py`; icons: `src/memo_app/icons.py`; motion: `src/memo_app/effects.py`.
+- Memo cards and the composer are custom-painted (paintEvent), not styled via QSS.
+- Never keep Python references to Qt animations started with `DeleteWhenStopped`
+  (stale wrapper -> access violation). Reuse persistent animations owned by the widget.

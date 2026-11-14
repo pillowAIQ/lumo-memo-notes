@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from . import db
 from . import nlp_time
+from . import theme
 from .capture import QuickCapture
 from .icons import make_icon
 from .widget import TodoWidget
@@ -188,6 +190,8 @@ class Controller(QObject):
         self.win = win
         self.win.controller = self
         self._listener = None
+        self._widget_enabled = True
+        self._quitting = False
 
         # 快捷键规格（QSettings 持久化，默认 ctrl+o）——须在托盘之前初始化
         from PySide6.QtCore import QSettings
@@ -203,9 +207,22 @@ class Controller(QObject):
         self.widget = TodoWidget()
         self.widget._memo_provider = self.win.visible_memos
         self.widget.open_main.connect(self.show_main)
+        self.widget.dismissed.connect(lambda: self._on_widget_toggled(False))
         self.widget.done_toggled.connect(self.win.toggle_done)
         self.win.memos_changed.connect(self.widget.reload)
         self.widget.reload()
+
+        # 多设备同步服务（网络全在工作线程，GUI 只收状态信号）
+        from .sync.service import SyncService
+        self.sync = SyncService(self)
+        self.win.memos_changed.connect(self.sync.notify_change)
+        # 远端数据应用后刷新主界面/挂件；编辑中的条目延迟到编辑结束
+        self.sync.synced.connect(self.widget.reload)
+        self.sync.synced.connect(self._on_synced_refresh)
+        # 同步状态 → 标题栏按钮变色/tooltip
+        self.sync.status_changed.connect(self.win._on_sync_status)
+        self.win._on_sync_status(self.sync.status_text)
+        QApplication.instance().aboutToQuit.connect(self.sync.shutdown)
 
         # 截止提醒：每 30s 扫一次已到期未提醒的备忘录
         self._remind_timer = QTimer(self)
@@ -218,8 +235,10 @@ class Controller(QObject):
         self.tray: QSystemTrayIcon | None = None
         if QSystemTrayIcon.isSystemTrayAvailable():
             self._build_tray()
-            self.widget.show()
             win.tray_available = True
+        self.win.installEventFilter(self)
+        QApplication.instance().aboutToQuit.connect(self._prepare_quit)
+        QTimer.singleShot(0, self, self._sync_widget_visibility)
 
         # 全局热键：pynput Listener（独立线程）只负责"按下事件"，
         # 修饰键与触发键状态一律用 GetAsyncKeyState 实时查询。
@@ -342,33 +361,30 @@ class Controller(QObject):
             self.a_capture.setText(f"快捷记录   {self.hotkey_display()}")
         return True
 
-    def open_settings(self) -> None:
+    def open_settings(self, page: str = "general") -> None:
         self.show_main()
-        from .settings_dialog import SettingsDialog
-        SettingsDialog(self, self.win).exec()
+        self.win.open_settings(page)
 
     # ---------- 托盘 ----------
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(make_icon(22), self)
-        self.tray.setToolTip("memo 备忘录")
+        self.tray.setToolTip(f"{theme.APP_NAME} · {theme.APP_NAME_EN}")
 
         menu = QMenu()
-        a_open = menu.addAction("打开主界面")
+        a_open = menu.addAction(f"打开{theme.APP_NAME}")
         self.a_capture = menu.addAction(f"快捷记录   {self.hotkey_display()}")
         a_settings = menu.addAction("设置…")
-        self.a_widget = menu.addAction("桌面挂件")
+        self.a_widget = menu.addAction("自动显示桌面挂件")
         self.a_widget.setCheckable(True)
-        self.a_widget.setChecked(True)
+        self.a_widget.setChecked(self._widget_enabled)
         menu.addSeparator()
         a_quit = menu.addAction("退出")
 
         a_open.triggered.connect(self.show_main)
         self.a_capture.triggered.connect(self.capture.toggle)
-        a_settings.triggered.connect(self.open_settings)
+        a_settings.triggered.connect(lambda: self.open_settings("general"))
         self.a_widget.toggled.connect(self._on_widget_toggled)
-        # 挂件被 × 隐藏时同步托盘勾选状态
-        self.widget.visibility_changed.connect(self.a_widget.setChecked)
         a_quit.triggered.connect(self.quit)
 
         self.tray.setContextMenu(menu)
@@ -376,7 +392,37 @@ class Controller(QObject):
         self.tray.show()
 
     def _on_widget_toggled(self, on: bool) -> None:
-        self.widget.setVisible(on)
+        self._widget_enabled = on
+        if hasattr(self, "a_widget"):
+            with QSignalBlocker(self.a_widget):
+                self.a_widget.setChecked(on)
+        # 设置页开着时同步开关状态（托盘菜单或挂件 × 也会改这个选项）
+        view = getattr(self.win, "settings_view", None)
+        switch = getattr(view.pages.get("general"), "widget_switch", None) if view is not None else None
+        if switch is not None and switch.isChecked() != on:
+            with QSignalBlocker(switch):
+                switch.setChecked(on)
+        self._sync_widget_visibility()
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.win and event.type() in (
+            QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.WindowStateChange,
+        ):
+            # Qt updates visibility/window state during event delivery.
+            QTimer.singleShot(0, self, self._sync_widget_visibility)
+        return super().eventFilter(obj, event)
+
+    def _sync_widget_visibility(self) -> None:
+        # Automatic hiding must not switch off the user's tray preference.
+        main_visible = self.win.isVisible()
+        background = (main_visible and self.win.isMinimized()) or (
+            not main_visible and self.win.tray_available
+        )
+        self.widget.setVisible(self._widget_enabled and not self._quitting and background)
+
+    def _prepare_quit(self) -> None:
+        self._quitting = True
+        self.widget.hide()
 
     def _on_tray_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -385,13 +431,15 @@ class Controller(QObject):
     # ---------- 动作 ----------
 
     def _on_capture_submit(self, text: str, cat_name: str = "") -> None:
-        cat_ids = None
-        if cat_name:
-            cat_ids = [db.find_or_create_category(cat_name)]
         if text.strip():
-            self.win.add_memo_text(text, cat_ids)
+            # 分类名与记录同事务创建/归入（同步原子性）
+            self.win.add_memo_text(text, cat_name=cat_name or None)
         elif cat_name:
             # 仅创建分类：备忘录为空时 add_memo_text 不会触发刷新
+            try:
+                db.find_or_create_category(cat_name)
+            except (ValueError, sqlite3.Error):
+                pass
             self.win.reload()
 
     def _check_reminders(self) -> None:
@@ -406,7 +454,7 @@ class Controller(QObject):
                 continue
             db.mark_notified(m.id)
             self.tray.showMessage(
-                "memo 提醒",
+                f"{theme.APP_NAME}提醒",
                 f"{m.content[:40]}\n{nlp_time.format_due(m.due_ts)}",
                 QSystemTrayIcon.MessageIcon.Information,
                 5000,
@@ -424,8 +472,54 @@ class Controller(QObject):
             if w is not None and hasattr(w, "_badges_html"):
                 w.badges_label.setText(w._badges_html())
                 w.badges_label.setVisible(bool(w.badges_label.text()))
+                QTimer.singleShot(0, w, w._update_height)
+
+    def sync_now_interactive(self, parent=None) -> None:
+        """手动同步：先让用户选择冲突处理策略（标题栏同步菜单入口）。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(parent)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.setWindowTitle("同步冲突处理")
+        box.setText("两台设备同时修改同一条备忘录时如何处理？")
+        box.setInformativeText(
+            "此选择只影响本次手动同步；后台自动同步默认后写覆盖。"
+        )
+        b_lww = box.addButton(
+            "后写覆盖（推荐）", QMessageBox.ButtonRole.AcceptRole
+        )
+        b_keep = box.addButton(
+            "保留冲突副本", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_lww:
+            self.sync.sync_now("lww")
+        elif clicked is b_keep:
+            self.sync.sync_now("keep")
+
+    def _on_synced_refresh(self) -> None:
+        """同步应用了远端数据：若有条目正在编辑则延迟刷新，
+        避免 reload 销毁编辑中的控件丢失未保存文本。"""
+        if self._win_editing():
+            QTimer.singleShot(3000, self, self._on_synced_refresh)
+            return
+        self.win.reload()
+
+    def _win_editing(self) -> bool:
+        try:
+            lst = self.win.list
+        except Exception:
+            return False
+        for i in range(lst.count()):
+            w = lst.itemWidget(lst.item(i))
+            if w is not None and getattr(w, "_editing", False):
+                return True
+        return False
 
     def show_main(self) -> None:
+        self.widget.hide()
         self.win.show()
         if self.win.isMinimized():
             self.win.setWindowState(Qt.WindowState.WindowNoState)
@@ -433,6 +527,7 @@ class Controller(QObject):
         self.win.activateWindow()
 
     def quit(self) -> None:
+        self._prepare_quit()
         if self._listener is not None:
             try:
                 self._listener.stop()

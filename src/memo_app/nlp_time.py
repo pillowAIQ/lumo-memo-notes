@@ -20,12 +20,35 @@ _DEFAULT_TIME = (9, 0)  # 只给日期时默认 09:00
 
 _PERIODS = "上午|中午|下午|晚上|凌晨|傍晚|早上|清晨|晚|早"
 
-# "下午3点" / "3点半" / "9点30分" / "14点"（时后不能紧跟"间"，排除"3小时"）
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+# 阿拉伯或中文数字：15 / 十五 / 二十三 / 两（用于时/分/日/后等）
+_NUM = (
+    r"(?:\d+|[一二两三四五六七八九]十[一二三四五六七八九]?"
+    r"|十[一二三四五六七八九]?|[一二两三四五六七八九])"
+)
+
+
+def _cn_to_int(s: str) -> int | None:
+    """'15'->15, '十五'->15, '二十三'->23, '两'->2；无法解析返回 None。"""
+    if s.isdigit():
+        return int(s)
+    if "十" not in s:
+        return _CN_DIGIT.get(s)
+    left, _, right = s.partition("十")
+    if (left and left not in _CN_DIGIT) or (right and right not in _CN_DIGIT):
+        return None
+    tens = _CN_DIGIT.get(left, 1) if left else 1
+    ones = _CN_DIGIT.get(right, 0) if right else 0
+    return tens * 10 + ones
+
+
+# "下午3点" / "两点半" / "9点30分" / "14点"（时后不能紧跟"间"，排除"3小时"）
 _TIME_RE = re.compile(
     rf"(?P<period>{_PERIODS})?\s*"
-    r"(?P<h>\d{1,2})\s*[点时](?!间)"
-    r"(?:\s*(?P<m1>\d{1,2})\s*分|\s*半)?"
-    r"(?!\d)"
+    rf"(?P<h>{_NUM})\s*[点时]钟?(?!间)"
+    rf"(?:\s*(?P<m1>{_NUM})\s*分|\s*半)?"
+    r"(?![\d一二两三四五六七八九十])"
 )
 # "14:30" / "下午2:30"（可带时段前缀）
 _TIME24_RE = re.compile(
@@ -36,17 +59,17 @@ _TIME24_RE = re.compile(
 # ---------- 日期表达 ----------
 
 _RE_WEEKDAY = re.compile(
-    r"(?<![每隔])(下下|下|上|本|这)?\s*(周|星期|礼拜)([一二三四五六日天末])"
+    r"(?<![每隔一两])(下下|下|上|本|这)?\s*(周|星期|礼拜)([一二三四五六日天末])"
 )
 _RE_MONTHDAY = re.compile(
-    r"(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
+    rf"(?:(\d{{4}})\s*年\s*)?({_NUM})\s*月\s*({_NUM})\s*[日号]?"
 )
-_RE_AFTER = re.compile(r"(\d+)\s*(?:天|日)\s*后")
+_RE_AFTER = re.compile(rf"({_NUM})\s*(?:天|日)\s*后")
 _RE_REL = re.compile(r"今天|今晚|明天|后天|大后天")
-# 裸"15日/15号"（不含"月"，排除"N天后/N日后"、"每月X日"及量词/类别字误伤）
+# 裸"15日/十五号"（不含"月"，排除"N天后/N日后"、"每月X日"及量词/类别字误伤）
 _RE_BAREDAY = re.compile(
-    r"(?<!\d)(?<!每月)(?<!第)(\d{1,2})\s*[日号]"
-    r"(?!\s*后|\d|[元记常假期岁本历线楼房室桌车站路口层座栋单元位排码桥街巷弄门窗])"
+    rf"(?<!\d)(?<!每月)(?<!第)({_NUM})\s*[日号]"
+    r"(?!\s*后|\d|[元记常假期岁本历线楼房室桌车站路口层座栋单元位排码桥街巷弄门窗内前来之间游上下一二两三四五六七八九十])"
 )
 
 
@@ -97,15 +120,16 @@ def _time_at(text: str, pos: int, default_period: str | None = None):
     """
     m = _TIME_RE.match(text, pos)
     if m:
-        hm = _parse_time(
-            int(m.group("h")),
-            int(m.group("m1")) if m.group("m1") else None,
-            "半" in m.group(0),
-            m.group("period") or default_period,
-            pm_lean=True,  # "H点"裸钟点偏 PM
-        )
-        if hm:
-            return m.end(), hm
+        h = _cn_to_int(m.group("h"))
+        mi = _cn_to_int(m.group("m1")) if m.group("m1") else None
+        if h is not None:
+            hm = _parse_time(
+                h, mi, "半" in m.group(0),
+                m.group("period") or default_period,
+                pm_lean=True,  # "H点"裸钟点偏 PM
+            )
+            if hm:
+                return m.end(), hm
     m24 = _TIME24_RE.match(text, pos)
     if m24:
         hm = _parse_time(
@@ -148,7 +172,9 @@ def _date_candidates(text: str, now: datetime):
 
     for m in _RE_MONTHDAY.finditer(text):
         y = int(m.group(1)) if m.group(1) else now.year
-        mo, da = int(m.group(2)), int(m.group(3))
+        mo, da = _cn_to_int(m.group(2)), _cn_to_int(m.group(3))
+        if mo is None or da is None:
+            continue
         try:
             d = datetime(y, mo, da).date()
         except ValueError:
@@ -161,7 +187,9 @@ def _date_candidates(text: str, now: datetime):
         yield m.start(), m.end(), d, None
 
     for m in _RE_AFTER.finditer(text):
-        yield m.start(), m.end(), today + timedelta(days=int(m.group(1))), None
+        n = _cn_to_int(m.group(1))
+        if n is not None:
+            yield m.start(), m.end(), today + timedelta(days=n), None
 
     for m in _RE_REL.finditer(text):
         word = m.group(0)
@@ -170,7 +198,9 @@ def _date_candidates(text: str, now: datetime):
         yield m.start(), m.end(), today + timedelta(days=_REL_DAYS[word]), night
 
     for m in _RE_BAREDAY.finditer(text):
-        da = int(m.group(1))
+        da = _cn_to_int(m.group(1))
+        if da is None:
+            continue
         y, mo = now.year, now.month
         try:
             d = datetime(y, mo, da).date()
@@ -197,10 +227,12 @@ def _time_only_candidates(text: str):
                 if not prev.isspace() and prev not in ",，、。.；;：:!！?？()（）[]【】\"'“”‘’~～-—":
                     continue
             if regex is _TIME_RE:
+                h = _cn_to_int(m.group("h"))
+                mi = _cn_to_int(m.group("m1")) if m.group("m1") else None
+                if h is None:
+                    continue
                 hm = _parse_time(
-                    int(m.group("h")),
-                    int(m.group("m1")) if m.group("m1") else None,
-                    "半" in m.group(0),
+                    h, mi, "半" in m.group(0),
                     m.group("period"),
                     pm_lean=True,
                 )

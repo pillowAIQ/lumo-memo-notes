@@ -5,7 +5,8 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from . import db
-from .app import QSS, MainWindow
+from . import theme
+from .app import MainWindow
 from .controller import Controller
 
 
@@ -30,10 +31,13 @@ def _setup_logging() -> None:
 def main() -> None:
     _setup_logging()
     app = QApplication(sys.argv)
+    # 内部标识保持 memo / memo_app：QSettings、数据目录、凭据沿用，不丢设置
     app.setApplicationName("memo")
     app.setOrganizationName("memo_app")
+    app.setApplicationDisplayName(theme.APP_NAME)
+    app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
-    app.setStyleSheet(QSS)  # 全局样式：对话框/菜单/控件统一美化
+    theme.apply(theme.saved_name())  # 全局样式：按上次选择的皮肤
 
     win = MainWindow()
     controller = Controller(win)  # 托盘 / 全局热键 / 快捷记录 / 桌面挂件
