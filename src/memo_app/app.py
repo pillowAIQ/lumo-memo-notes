@@ -6,8 +6,8 @@ import sqlite3
 from datetime import datetime
 from html import escape
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -32,13 +32,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import db
+from . import effects
 from . import nlp_time
 from .category_dialog import CategoryPickerDialog
 from .db import Category, Memo
-from .icons import make_icon, ui_icon
-from .settings_dialog import SettingsDialog
+from .icons import make_icon, mark_pixmap, ui_icon
+from .settings_dialog import SettingsView
 from .task_dialog import TaskPropsDialog
-from .theme import QSS
+from . import theme
 
 
 def rel_time(iso: str) -> str:
@@ -100,9 +101,9 @@ class _NavButton(QToolButton):
 
 
 class TitleBar(QWidget):
-    """自绘标题栏：图标+名称+编辑菜单+设置+窗口控制按钮。"""
+    """自绘标题栏：品牌 + 居中搜索（仿编辑器命令栏）+ 同步状态 + 窗口控制。"""
 
-    def __init__(self, win: "MainWindow", edit_menu: QMenu) -> None:
+    def __init__(self, win: "MainWindow") -> None:
         super().__init__()
         self.win = win
         self.setObjectName("titleBar")
@@ -110,59 +111,65 @@ class TitleBar(QWidget):
         self.setFixedHeight(40)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 0, 8, 0)
+        lay.setContentsMargins(12, 0, 6, 0)
         lay.setSpacing(6)
 
-        icon = QLabel()
-        icon.setObjectName("tbIcon")
-        icon.setPixmap(make_icon(18).pixmap(18, 18))
-        lay.addWidget(icon)
-        title = QLabel("memo  /  个人备忘录")
+        self.icon = QLabel()
+        self.icon.setPixmap(mark_pixmap(18))
+        lay.addWidget(self.icon)
+        title = QLabel(f"{theme.APP_NAME}  {theme.APP_NAME_EN}")
         title.setObjectName("tbTitle")
         lay.addWidget(title)
         lay.addStretch(1)
 
-        self.edit_nav = _NavButton("编辑", edit_menu, self)
-        lay.addWidget(self.edit_nav)
+        self.search = QLineEdit()
+        self.search.setObjectName("titleSearch")
+        self.search.setPlaceholderText("搜索笔记    Ctrl+F")
+        self.search.setAccessibleName("搜索备忘录")
+        self.search.setToolTip("搜索备忘录 (Ctrl+F)")
+        self.search.setClearButtonEnabled(True)
+        self.search.setFixedWidth(340)
+        self.search_action = self.search.addAction(QIcon(), QLineEdit.ActionPosition.LeadingPosition)
+        lay.addWidget(self.search)
+        lay.addStretch(1)
 
         # 多设备同步入口（仿 Obsidian Sync：导航栏一键唤出状态菜单）
         self.sync_btn = QToolButton()
         self.sync_btn.setText("同步")
-        self.sync_btn.setIcon(ui_icon("sync", size=14))
         self.sync_btn.setIconSize(QSize(14, 14))
+        self.sync_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.sync_btn.setObjectName("navBtn")
         self.sync_btn.setToolTip("多设备同步")
         self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sync_btn.clicked.connect(
-            lambda: win._open_sync_menu(self.sync_btn)
-        )
+        self.sync_btn.clicked.connect(lambda: win._open_sync_menu(self.sync_btn))
         lay.addWidget(self.sync_btn)
+        lay.addSpacing(6)
 
-        settings_btn = QToolButton()
-        settings_btn.setText("设置")
-        settings_btn.setObjectName("navBtn")
-        settings_btn.clicked.connect(win._open_settings)
-        lay.addWidget(settings_btn)
-        lay.addSpacing(8)
-
-        self.min_btn = self._wbtn("minus", "winBtn", "最小化", win.showMinimized)
-        self.max_btn = self._wbtn("maximize", "winBtn", "最大化/还原", self._toggle_max)
-        close_btn = self._wbtn("close", "closeBtn", "关闭到托盘", win.close)
-        for b in (self.min_btn, self.max_btn, close_btn):
+        self.min_btn = self._wbtn("winBtn", "最小化", win.showMinimized)
+        self.max_btn = self._wbtn("winBtn", "最大化/还原", self._toggle_max)
+        self.close_btn = self._wbtn("closeBtn", "关闭到托盘", win.close)
+        for b in (self.min_btn, self.max_btn, self.close_btn):
             lay.addWidget(b)
+        self.retheme()
 
     @staticmethod
-    def _wbtn(icon, objname, tip, slot) -> QToolButton:
+    def _wbtn(objname, tip, slot) -> QToolButton:
         b = QToolButton()
-        b.setIcon(ui_icon(icon, size=14))
         b.setIconSize(QSize(14, 14))
         b.setObjectName(objname)
         b.setToolTip(tip)
         b.setAccessibleName(tip)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setFixedSize(36, 30)
+        b.setFixedSize(38, 30)
         b.clicked.connect(slot)
         return b
+
+    def retheme(self) -> None:
+        muted = theme.c("text_2")
+        self.search_action.setIcon(ui_icon("search", theme.c("muted"), 15))
+        self.min_btn.setIcon(ui_icon("minus", muted, 14))
+        effects.hover_icon(self.close_btn, ui_icon("close", muted, 14), ui_icon("close", "#FFFFFF", 14))
+        self.sync_max()
 
     def _toggle_max(self) -> None:
         if self.win.isMaximized():
@@ -172,7 +179,8 @@ class TitleBar(QWidget):
         self.sync_max()
 
     def sync_max(self) -> None:
-        self.max_btn.setIcon(ui_icon("restore_window" if self.win.isMaximized() else "maximize", size=14))
+        name = "restore_window" if self.win.isMaximized() else "maximize"
+        self.max_btn.setIcon(ui_icon(name, theme.c("text_2"), 14))
 
     def mouseDoubleClickEvent(self, e):  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
@@ -241,7 +249,7 @@ class CategoryRow(QWidget):
         lay.setSpacing(9)
 
         icon = QLabel()
-        icon.setPixmap(ui_icon("notes" if cat_id == 0 else "folder", "#6D8469", 16).pixmap(16, 16))
+        icon.setPixmap(ui_icon("notes" if cat_id == 0 else "folder", theme.c("muted"), 16).pixmap(16, 16))
         icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay.addWidget(icon)
 
@@ -257,10 +265,13 @@ class CategoryRow(QWidget):
         self.count_label = QLabel(str(count))
         self.count_label.setObjectName("catCount")
         self.count_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        lay.addWidget(self.count_label)
+        self.count_label.setFixedHeight(18)
+        self.count_label.setMinimumWidth(18)
+        self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.del_btn = QPushButton()
-        self.del_btn.setIcon(ui_icon("close", "#9B523D", 12))
+        self.del_btn.setIcon(ui_icon("close", theme.c("danger"), 12))
         self.del_btn.setObjectName("catDel")
         self.del_btn.setFixedSize(18, 18)
         self.del_btn.setAccessibleName(f"删除分类 {name}")
@@ -323,7 +334,7 @@ class CategoryRow(QWidget):
 class MemoItemWidget(QWidget):
     """单条备忘录的展示控件（卡片样式，内容自动换行、高度自适应）。"""
 
-    HEIGHT = 88
+    HEIGHT = 90
     height_changed = Signal(int)
 
     def __init__(self, memo: Memo, win: "MainWindow"):
@@ -334,8 +345,11 @@ class MemoItemWidget(QWidget):
         self._editing = False
         self.setObjectName("memoItem")
         self.setProperty("selected", False)
-        # 自定义 QWidget 子类需此属性 QSS 背景/边框/圆角才会绘制
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 卡片背景/边框/投影在 paintEvent 手绘，以便悬停浮起与高亮做平滑过渡
+        self._hover_t = 0.0
+        self._flash_t = 0.0
+        self._hover_fx = QObject(self)
+        self._flash_fx = QObject(self)
         self._build()
         self._apply_state()
         self.setMinimumHeight(self.HEIGHT)
@@ -347,7 +361,7 @@ class MemoItemWidget(QWidget):
 
     def _build(self) -> None:
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 15, 14, 13)
+        lay.setContentsMargins(18, 15, 14, 15)
         lay.setSpacing(8)
         content_row = QHBoxLayout()
         self.content_row = content_row
@@ -358,9 +372,7 @@ class MemoItemWidget(QWidget):
         self.done_btn.setFixedSize(20, 20)
         self.done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.done_btn.setFlat(True)
-        self.done_btn.clicked.connect(
-            lambda: self.win.toggle_done(self.memo.id)
-        )
+        self.done_btn.clicked.connect(self._on_done_clicked)
         content_row.addWidget(self.done_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # 内容区：label / 编辑框 叠放
@@ -390,7 +402,6 @@ class MemoItemWidget(QWidget):
         # 删除按钮：常显暖灰，悬停变红
         self.del_btn = QPushButton()
         self.del_btn.setObjectName("deleteAction")
-        self.del_btn.setIcon(ui_icon("trash", "#8B8172", 15))
         self.del_btn.setFixedSize(28, 28)
         self.del_btn.setToolTip("移到回收站")
         self.del_btn.setAccessibleName("移到回收站")
@@ -401,7 +412,6 @@ class MemoItemWidget(QWidget):
         # 任务属性按钮：截止/优先级/重复/提醒
         self.props_btn = QPushButton()
         self.props_btn.setObjectName("cardAction")
-        self.props_btn.setIcon(ui_icon("sliders", size=16))
         self.props_btn.setFixedSize(28, 28)
         self.props_btn.setToolTip("截止时间、优先级与提醒")
         self.props_btn.setAccessibleName("任务属性")
@@ -416,7 +426,6 @@ class MemoItemWidget(QWidget):
         # 回收站模式：显示"恢复"按钮
         self.restore_btn = QPushButton()
         self.restore_btn.setObjectName("cardAction")
-        self.restore_btn.setIcon(ui_icon("restore", "#2D6550", 16))
         self.restore_btn.setFixedSize(28, 28)
         self.restore_btn.setToolTip("恢复备忘录")
         self.restore_btn.setAccessibleName("恢复备忘录")
@@ -426,6 +435,8 @@ class MemoItemWidget(QWidget):
         self.restore_btn.clicked.connect(lambda: self.win.restore_memo(self.memo.id))
         content_row.addWidget(self.restore_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(content_row)
+        effects.hover_icon(self.restore_btn, ui_icon("restore", theme.c("accent"), 16), ui_icon("restore", theme.c("accent_press"), 16))
+        self._sync_action_icons(False)
 
         # 右侧元信息：置顶图钉 + 相对时间 + 分类标签
         self.meta = QHBoxLayout()
@@ -455,9 +466,25 @@ class MemoItemWidget(QWidget):
     # ---------- 状态 ----------
 
     def set_selected(self, on: bool) -> None:
-        self.setProperty("selected", on)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        if self.property("selected") != on:
+            self.setProperty("selected", on)
+            self.update()
+
+    def _sync_action_icons(self, card_hovered: bool) -> None:
+        # 卡片静止时操作图标更轻，悬停卡片时加深，悬停按钮本身再强调
+        idle = theme.c("text_2" if card_hovered else "faint")
+        effects.hover_icon(self.props_btn, ui_icon("sliders", idle, 16), ui_icon("sliders", theme.c("accent"), 16))
+        effects.hover_icon(self.del_btn, ui_icon("trash", idle, 15), ui_icon("trash", theme.c("danger"), 15))
+
+    def _on_done_clicked(self) -> None:
+        if not self.memo.is_done:
+            # 先让圆圈填充打勾，给出即时反馈，再淡出卡片
+            self.done_btn.setProperty("done", "true")
+            check = ui_icon("check", theme.c("on_accent"), 14)
+            effects.hover_icon(self.done_btn, check, check)
+            self.done_btn.style().unpolish(self.done_btn)
+            self.done_btn.style().polish(self.done_btn)
+        self.win.toggle_done(self.memo.id)
 
     def _apply_state(self) -> None:
         # 高优先级卡片淡红底色提示
@@ -468,7 +495,11 @@ class MemoItemWidget(QWidget):
 
         done = self.memo.is_done
         self.done_btn.setProperty("done", "true" if done else "false")
-        self.done_btn.setIcon(ui_icon("check", "#FFFFFF", 14) if done else QIcon())
+        if done:
+            check = ui_icon("check", theme.c("on_accent"), 14)
+            effects.hover_icon(self.done_btn, check, check)
+        else:
+            effects.hover_icon(self.done_btn, QIcon(), ui_icon("check", theme.c("accent"), 14))
         self.done_btn.setIconSize(QSize(14, 14))
         self.done_btn.setAccessibleName("取消完成" if done else "标记完成")
         self.done_btn.setToolTip("取消完成" if done else "标记完成")
@@ -526,7 +557,7 @@ class MemoItemWidget(QWidget):
         badge_h = 0
         if not self.badges_label.isHidden():
             badge_h = self.badges_label.heightForWidth(max(1, self.width() - 32)) + 8
-        h = max(self.HEIGHT, max(br.height(), 28) + meta_h + badge_h + 36)
+        h = max(self.HEIGHT, max(br.height(), 28) + meta_h + badge_h + 38)
         if abs(h - self.height()) > 1:
             self.setFixedHeight(h)
             self.height_changed.emit(h)
@@ -539,18 +570,18 @@ class MemoItemWidget(QWidget):
         if m.due_ts:
             overdue = m.due_ts < now_ts
             today = datetime.now().date() == datetime.fromtimestamp(m.due_ts).date()
-            color = "#AC503B" if overdue else ("#8D6339" if today else "#69766E")
+            color = theme.c("overdue") if overdue else theme.c("warn" if today else "muted")
             prefix = "已逾期 · " if overdue else "截止 · "
             parts.append(
                 f'<span style="color:{color}">{prefix}{nlp_time.format_due(m.due_ts)}</span>'
             )
         if 0 < m.priority <= 3:
-            pcolor = {1: "#69766E", 2: "#8D6339", 3: "#AC503B"}[m.priority]
+            pcolor = theme.c({1: "muted", 2: "warn", 3: "overdue"}[m.priority])
             parts.append(
                 f'<span style="color:{pcolor}">{db.PRIORITY_LABELS[m.priority]}优先级</span>'
             )
         if m.recur:
-            parts.append(f'<span style="color:#69766E">{escape(db.RECUR_LABELS.get(m.recur, m.recur))}</span>')
+            parts.append(f'<span style="color:{theme.c("muted")}">{escape(db.RECUR_LABELS.get(m.recur, m.recur))}</span>')
         return " &nbsp; / &nbsp; ".join(parts)
 
     def _badges_tooltip(self) -> str:
@@ -565,6 +596,59 @@ class MemoItemWidget(QWidget):
         if m.recur:
             tips.append(f"重复：{db.RECUR_LABELS.get(m.recur, m.recur)}")
         return "\n".join(tips)
+
+    # ---------- 绘制 / 动效 ----------
+
+    def paintEvent(self, e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h, f = self._hover_t, self._flash_t
+        selected = bool(self.property("selected"))
+        card = QRectF(self.rect()).adjusted(1.5, 1.0, -1.5, -3.5)
+        # 底部柔和投影：静止时几乎不可见，悬停时轻微浮起
+        boost = 2.2 if theme.is_dark() else 1.0
+        for dy, rest, lifted in ((3.0, 5, 13), (2.0, 7, 15), (1.0, 9, 17)):
+            shadow = QPainterPath()
+            shadow.addRoundedRect(card.translated(0, dy), 10, 10)
+            p.fillPath(shadow, theme.qc("shadow", round((rest + (lifted - rest) * h) * boost)))
+        path = QPainterPath()
+        path.addRoundedRect(card, 10, 10)
+        if self.property("completed"):
+            bg = theme.qc("surface_muted")
+        else:
+            bg = theme.qc("selected" if selected else "surface")
+        p.fillPath(path, effects.mix(bg, theme.c("flash"), f * 0.9))
+        if self.property("prioHigh") == "true":
+            p.save()
+            p.setClipPath(path)
+            p.fillRect(QRectF(card.left(), card.top(), 3.5, card.height()), theme.qc("prio"))
+            p.restore()
+        border = theme.qc("focus") if selected else effects.mix(theme.c("border"), theme.c("border_hover"), h)
+        p.setPen(QPen(effects.mix(border, theme.c("flash_border"), f), 1.0))
+        p.drawPath(path)
+        p.end()
+
+    def _set_hover_t(self, v: float) -> None:
+        self._hover_t = v
+        self.update()
+
+    def _set_flash_t(self, v: float) -> None:
+        self._flash_t = v
+        self.update()
+
+    def enterEvent(self, e):  # noqa: N802
+        effects.tween(self._hover_fx, self._hover_t, 1.0, effects.NORMAL, self._set_hover_t)
+        self._sync_action_icons(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):  # noqa: N802
+        effects.tween(self._hover_fx, self._hover_t, 0.0, effects.SLOW, self._set_hover_t)
+        self._sync_action_icons(False)
+        super().leaveEvent(e)
+
+    def flash(self) -> None:
+        """新增 / 恢复 / 置顶后短暂高亮，让视线找到它。"""
+        effects.tween(self._flash_fx, 1.0, 0.0, 1100, self._set_flash_t, QEasingCurve.Type.InQuad)
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
@@ -629,10 +713,51 @@ class MemoItemWidget(QWidget):
             )
             m.addAction("分类…", lambda: self.win.assign_categories(self.memo.id))
             m.addAction("任务属性…", lambda: self.win.edit_task_props(self.memo.id))
-            m.addAction("复制", lambda: QApplication.clipboard().setText(self.full_text))
+            m.addAction("复制", lambda: self.win.copy_text(self.full_text))
             m.addSeparator()
             m.addAction("删除", lambda: self.win.delete_memo(self.memo.id))
         m.exec(self.mapToGlobal(pos))
+
+
+class ComposerFrame(QWidget):
+    """顶部输入卡片：聚焦时边框加深并淡入一圈柔和的焦点光环。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("composer")
+        self.setProperty("active", False)
+        self._focus_t = 0.0
+        self._fx = QObject(self)
+
+    def set_active(self, on: bool) -> None:
+        self.setProperty("active", on)
+        effects.tween(self._fx, self._focus_t, 1.0 if on else 0.0, effects.NORMAL, self._set_focus_t)
+
+    def _set_focus_t(self, v: float) -> None:
+        self._focus_t = v
+        self.update()
+
+    def paintEvent(self, e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        t = self._focus_t
+        card = QRectF(self.rect()).adjusted(3.5, 3.5, -3.5, -3.5)
+        boost = 2.5 if theme.is_dark() else 1.0
+        for dy, alpha in ((2.0, 6), (1.0, 9)):
+            shadow = QPainterPath()
+            shadow.addRoundedRect(card.translated(0, dy), 12, 12)
+            p.fillPath(shadow, theme.qc("shadow", round(alpha * boost)))
+        if t > 0:
+            ring = QPainterPath()
+            ring.addRoundedRect(card.adjusted(-1.5, -1.5, 1.5, 1.5), 13.5, 13.5)
+            p.setPen(QPen(theme.qc("focus", round(70 * t)), 3.0))
+            p.drawPath(ring)
+        path = QPainterPath()
+        path.addRoundedRect(card, 12, 12)
+        p.fillPath(path, theme.qc("surface"))
+        p.setPen(QPen(effects.mix(theme.c("border"), theme.c("focus"), t), 1.0))
+        p.drawPath(path)
+        p.end()
 
 
 class MainWindow(QMainWindow):
@@ -650,18 +775,26 @@ class MainWindow(QMainWindow):
         self._categories: list[Category] = []
         self._memo_cats: dict[int, set[int]] = {}
         self._cat_names: dict[int, str] = {}
+        self._flash_id: int | None = None
+        self._leaving_ids: set[int] = set()
+        self._reload_gen = 0
         self._build_ui()
         self.reload()
+        # 首次显示时焦点落在输入框，而不是 Tab 顺序第一位的标题栏搜索
+        self.input_edit.setFocus()
 
     # ---------- UI ----------
 
     def _build_ui(self) -> None:
-        self.setWindowTitle("memo")
+        self.setWindowTitle(f"{theme.APP_NAME} · {theme.APP_NAME_EN}")
         self.setWindowIcon(make_icon(64))
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.resize(1080, 800)
         self.setMinimumSize(680, 520)
-        self.setStyleSheet(QSS)
+        app = QApplication.instance()
+        effects.install(app)
+        if not app.styleSheet():
+            theme.apply(theme.current_name())
 
         central = QWidget()
         central.setObjectName("central")
@@ -670,101 +803,127 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ===== 编辑菜单（挂在标题栏） =====
-        edit_menu = QMenu(self)
-        self.search_action = edit_menu.addAction("搜索备忘录")
+        # ===== 自绘标题栏（含居中搜索） =====
+        self.titlebar = TitleBar(self)
+        root.addWidget(self.titlebar)
+        self.search_edit = self.titlebar.search
+        self.search_edit.installEventFilter(self)
+        self.search_action = QAction("搜索备忘录", self)
         self.search_action.setShortcut(QKeySequence.StandardKey.Find)
         self.search_action.triggered.connect(lambda: self._toggle_search(True))
         self.addAction(self.search_action)
-        edit_menu.addSeparator()
-        self.trash_action = edit_menu.addAction("回收站")
-        self.trash_action.setCheckable(True)
-        self.trash_action.triggered.connect(self._toggle_trash)
 
-        # ===== 自绘标题栏 =====
-        self.titlebar = TitleBar(self, edit_menu)
-        root.addWidget(self.titlebar)
-
-        # ===== 主体：侧边栏 + 内容区 =====
-        body = QHBoxLayout()
+        # ===== 主体：笔记页 / 设置页 =====
+        self.body_stack = QStackedWidget()
+        root.addWidget(self.body_stack, 1)
+        self.settings_view: SettingsView | None = None
+        main_page = QWidget()
+        body = QHBoxLayout(main_page)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
+        self.body_stack.addWidget(main_page)
 
+        # ----- 侧栏 -----
         self.side = QWidget()
         self.side.setObjectName("sidePanel")
-        self.side.setFixedWidth(214)
+        self.side.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.side.setFixedWidth(220)
         side_lay = QVBoxLayout(self.side)
         self.side_layout = side_lay
-        side_lay.setContentsMargins(16, 24, 16, 16)
-        side_lay.setSpacing(8)
+        side_lay.setContentsMargins(12, 18, 12, 10)
+        side_lay.setSpacing(4)
 
         brand = QHBoxLayout()
-        brand.setContentsMargins(10, 0, 0, 0)
-        mark = QLabel()
-        mark.setPixmap(make_icon(32).pixmap(32, 32))
-        brand.addWidget(mark)
-        wordmark = QLabel("memo")
-        wordmark.setObjectName("wordmark")
-        brand.addWidget(wordmark)
-        brand.addStretch(1)
+        brand.setContentsMargins(8, 0, 0, 0)
+        brand.setSpacing(10)
+        self.brand_mark = QLabel()
+        brand.addWidget(self.brand_mark)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(0)
+        name = QLabel(theme.APP_NAME)
+        name.setObjectName("brandName")
+        self.brand_sub = QLabel(f"{theme.APP_NAME_EN} · 随手记与待办")
+        self.brand_sub.setObjectName("brandSub")
+        brand_text.addWidget(name)
+        brand_text.addWidget(self.brand_sub)
+        brand.addLayout(brand_text, 1)
         side_lay.addLayout(brand)
-        workspace = QLabel("留住想法，轻装前行。")
-        self.workspace_label = workspace
-        workspace.setObjectName("workspaceLabel")
-        workspace.setContentsMargins(10, 4, 0, 18)
-        side_lay.addWidget(workspace)
+        side_lay.addSpacing(18)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         rows_host = QWidget()
-
         self.side_rows = QVBoxLayout(rows_host)
-        self.side_rows.setSpacing(4)
+        self.side_rows.setSpacing(2)
         self.side_rows.setContentsMargins(0, 0, 0, 0)
         self.side_rows.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(rows_host)
         side_lay.addWidget(scroll, 1)
 
-        self.add_cat_btn = QPushButton("  新建分类")
-        self.add_cat_btn.setIcon(ui_icon("plus", size=15))
-        self.add_cat_btn.setObjectName("addCatBtn")
+        # 分类分区标题：名称 + 行内新建按钮（重建侧栏时复用，不删除）
+        self.section_header = QWidget()
+        sh = QHBoxLayout(self.section_header)
+        sh.setContentsMargins(10, 16, 2, 4)
+        section = QLabel("分类")
+        section.setObjectName("sectionLabel")
+        sh.addWidget(section)
+        sh.addStretch(1)
+        self.add_cat_btn = QToolButton()
+        self.add_cat_btn.setObjectName("sectionAdd")
+        self.add_cat_btn.setIconSize(QSize(14, 14))
+        self.add_cat_btn.setFixedSize(24, 24)
+        self.add_cat_btn.setToolTip("新建分类")
+        self.add_cat_btn.setAccessibleName("新建分类")
         self.add_cat_btn.clicked.connect(self._add_category)
-        side_lay.addWidget(self.add_cat_btn)
-        self.trash_btn = QPushButton("  回收站")
-        self.trash_btn.setIcon(ui_icon("trash", size=16))
-        self.trash_btn.setObjectName("sideNav")
-        self.trash_btn.setCheckable(True)
-        self.trash_btn.clicked.connect(self._set_trash)
-        side_lay.addWidget(self.trash_btn)
-        settings_btn = QPushButton("  设置")
-        settings_btn.setIcon(ui_icon("sliders", size=16))
-        settings_btn.setObjectName("sideNav")
-        settings_btn.clicked.connect(self._open_settings)
-        side_lay.addWidget(settings_btn)
+        sh.addWidget(self.add_cat_btn)
 
-        local_card = QWidget()
-        self.local_card = local_card
-        local_card.setObjectName("localCard")
-        local_lay = QVBoxLayout(local_card)
-        local_lay.setContentsMargins(12, 12, 12, 12)
-        local_lay.setSpacing(5)
-        local_title = QLabel("你的记录，只属于你")
-        local_title.setObjectName("localTitle")
-        local_hint = QLabel("本地存储  /  无需联网")
-        local_hint.setObjectName("localHint")
-        local_lay.addWidget(local_title)
-        local_lay.addWidget(local_hint)
-        self.local_card_gap = QSpacerItem(0, 8, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        side_lay.addItem(self.local_card_gap)
-        side_lay.addWidget(local_card)
+        # 底部：回收站 + 设置菜单（仿编辑器左下角齿轮）
+        self.side_footer = QWidget()
+        self.side_footer.setObjectName("sideFooter")
+        self.side_footer.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        fl = QHBoxLayout(self.side_footer)
+        fl.setContentsMargins(0, 8, 0, 0)
+        fl.setSpacing(4)
+        self.trash_btn = QToolButton()
+        self.trash_btn.setObjectName("footerBtn")
+        self.trash_btn.setText("回收站")
+        self.trash_btn.setCheckable(True)
+        self.trash_btn.setIconSize(QSize(16, 16))
+        self.trash_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.trash_btn.clicked.connect(self._set_trash)
+        fl.addWidget(self.trash_btn)
+        fl.addStretch(1)
+        self.settings_menu = QMenu(self)
+        for key, label in (("general", "常规"), ("appearance", "外观与皮肤"),
+                           ("hotkeys", "快捷键"), ("sync", "多端同步")):
+            action = self.settings_menu.addAction(label)
+            action.setData(key)
+            action.triggered.connect(lambda _c=False, k=key: self.open_settings(k))
+        self.settings_menu.addSeparator()
+        about = self.settings_menu.addAction(f"关于{theme.APP_NAME}")
+        about.setData("about")
+        about.triggered.connect(lambda: self.open_settings("about"))
+        self.settings_btn = QToolButton()
+        self.settings_btn.setObjectName("footerBtn")
+        self.settings_btn.setText("设置")
+        self.settings_btn.setIconSize(QSize(16, 16))
+        self.settings_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.settings_btn.setMenu(self.settings_menu)
+        self.settings_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.settings_btn.setToolTip("设置")
+        fl.addWidget(self.settings_btn)
+        side_lay.addWidget(self.side_footer)
         body.addWidget(self.side)
 
+        # ----- 内容区 -----
         content = QWidget()
+        self.content = content
         content.setObjectName("contentPanel")
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         maincol = QVBoxLayout(content)
         self.content_layout = maincol
-        maincol.setContentsMargins(36, 26, 36, 18)
+        maincol.setContentsMargins(40, 28, 40, 16)
         maincol.setSpacing(0)
         self._vertical_gaps = []
 
@@ -773,48 +932,37 @@ class MainWindow(QMainWindow):
             maincol.addItem(spacer)
             self._vertical_gaps.append((spacer, normal, compact))
 
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("searchInput")
-        self.search_edit.setPlaceholderText("搜索备忘录")
-        self.search_edit.setAccessibleName("搜索备忘录")
-        self.search_edit.installEventFilter(self)
-        self.search_edit.addAction(ui_icon("search", size=15), QLineEdit.ActionPosition.LeadingPosition)
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setFixedWidth(212)
-        self.search_edit.setToolTip("搜索备忘录 (Ctrl+F)")
         heading = QHBoxLayout()
-        heading.setSpacing(16)
-        self.page_title = QLabel("所有备忘录")
+        heading.setSpacing(10)
+        self.page_title = QLabel("所有笔记")
         self.page_title.setTextFormat(Qt.TextFormat.PlainText)
         self.page_title.setObjectName("pageTitle")
-        self.page_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.page_title.setMinimumWidth(0)
-        heading.addWidget(self.page_title, 1)
-        heading.addWidget(self.search_edit)
+        heading.addWidget(self.page_title)
+        self.count_badge = QLabel("0")
+        self.count_badge.setObjectName("pageCount")
+        heading.addWidget(self.count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        heading.addStretch(1)
+        self.date_label = QLabel()
+        self.date_label.setObjectName("dateLabel")
+        heading.addWidget(self.date_label, 0, Qt.AlignmentFlag.AlignVCenter)
         maincol.addLayout(heading)
-        gap(6, 0)
+        gap(6, 2)
 
-        subheading = QHBoxLayout()
         self.page_subtitle = QLabel("把琐事放在这里，把注意力留给生活。")
         self.page_subtitle.setObjectName("pageSubtitle")
         self.page_subtitle.setWordWrap(True)
-        subheading.addWidget(self.page_subtitle, 1)
-        self.date_label = QLabel()
-        self.date_label.setObjectName("dateLabel")
-        subheading.addWidget(self.date_label)
-        maincol.addLayout(subheading)
-        gap(22, 14)
+        maincol.addWidget(self.page_subtitle)
+        gap(20, 12)
 
-        self.composer = QWidget()
-        self.composer.setObjectName("composer")
+        self.composer = ComposerFrame()
         composer_lay = QVBoxLayout(self.composer)
-        composer_lay.setContentsMargins(16, 10, 12, 10)
+        composer_lay.setContentsMargins(19, 13, 15, 13)
         composer_lay.setSpacing(4)
         input_row = QHBoxLayout()
         input_row.setSpacing(12)
-        compose_icon = QLabel()
-        compose_icon.setPixmap(ui_icon("note", "#6D8469", 22).pixmap(22, 22))
-        input_row.addWidget(compose_icon)
+        self.compose_icon = QLabel()
+        input_row.addWidget(self.compose_icon)
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("mainInput")
         self.input_edit.setPlaceholderText("此刻，有什么想记下来？")
@@ -823,23 +971,27 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.input_edit, 1)
         self.save_btn = QPushButton("记录")
         self.save_btn.setObjectName("saveBtn")
-        self.save_btn.setFixedHeight(32)
+        self.save_btn.setFixedHeight(34)
+        self.save_btn.setIconSize(QSize(14, 14))
+        self.save_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.save_btn.setToolTip("保存 (Enter)")
         self.save_btn.setEnabled(False)
         self.save_btn.clicked.connect(self._on_add)
         input_row.addWidget(self.save_btn)
         composer_lay.addLayout(input_row)
-        self.composer_hint = QLabel("Enter 保存  ·  支持「明天9点」设提醒")
+        self.composer_hint = QLabel("Enter 保存  ·  支持「明天9点」设提醒  ·  !高 设优先级")
         self.composer_hint.setObjectName("composerHint")
         self.composer_hint.setWordWrap(True)
         self.composer_hint.setContentsMargins(34, 0, 0, 0)
         self.composer_hint.setToolTip("例如：明天9点开会 !高 @每周 提前30分钟\n双击记录编辑，右键可置顶、分类或复制")
         composer_lay.addWidget(self.composer_hint)
         maincol.addWidget(self.composer)
-        gap(18, 14)
+        gap(18, 12)
 
         filters = QHBoxLayout()
         self.filter_group = QWidget()
         self.filter_group.setObjectName("filterGroup")
+        self.filter_group.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         filter_lay = QHBoxLayout(self.filter_group)
         filter_lay.setContentsMargins(3, 3, 3, 3)
         filter_lay.setSpacing(2)
@@ -854,7 +1006,7 @@ class MainWindow(QMainWindow):
             filter_lay.addWidget(btn)
         filters.addWidget(self.filter_group)
         filters.addStretch(1)
-        self.list_heading = QLabel("最近记录")
+        self.list_heading = QLabel("按置顶与更新时间排序")
         self.list_heading.setObjectName("listHeading")
         filters.addWidget(self.list_heading)
         maincol.addLayout(filters)
@@ -863,14 +1015,15 @@ class MainWindow(QMainWindow):
         # 回收站横幅：仅回收站模式显示（返回 + 计数 + 清空）
         self.trash_bar = QWidget()
         self.trash_bar.setObjectName("trashBar")
+        self.trash_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.trash_bar.setVisible(False)
         tbl = QHBoxLayout(self.trash_bar)
-        tbl.setContentsMargins(12, 5, 10, 5)
+        tbl.setContentsMargins(10, 5, 10, 5)
         tbl.setSpacing(6)
-        back_btn = QPushButton("← 返回")
-        back_btn.setObjectName("trashBack")
-        back_btn.clicked.connect(lambda: self._set_trash(False))
-        tbl.addWidget(back_btn)
+        self.trash_back_btn = QPushButton(" 返回")
+        self.trash_back_btn.setObjectName("trashBack")
+        self.trash_back_btn.clicked.connect(lambda: self._set_trash(False))
+        tbl.addWidget(self.trash_back_btn)
         self.trash_title = QLabel("")
         self.trash_title.setObjectName("trashTitle")
         tbl.addWidget(self.trash_title)
@@ -894,9 +1047,10 @@ class MainWindow(QMainWindow):
         empty_wrap = QWidget()
         ev = QVBoxLayout(empty_wrap)
         ev.setContentsMargins(0, 0, 0, 0)
-        empty_icon = QLabel()
-        empty_icon.setPixmap(ui_icon("note", "#8EA585", 56).pixmap(56, 56))
-        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_icon = QLabel()
+        self.empty_icon.setObjectName("emptyIcon")
+        self.empty_icon.setFixedSize(88, 88)
+        self.empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_title = QLabel("给想法一个落脚点")
         self.empty_title.setObjectName("emptyTitle")
         self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -905,7 +1059,7 @@ class MainWindow(QMainWindow):
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setWordWrap(True)
         ev.addStretch(1)
-        ev.addWidget(empty_icon)
+        ev.addWidget(self.empty_icon, 0, Qt.AlignmentFlag.AlignHCenter)
         ev.addSpacing(18)
         ev.addWidget(self.empty_title)
         ev.addSpacing(6)
@@ -919,15 +1073,15 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("statusLabel")
         bottom.addWidget(self.status_label)
         bottom.addStretch(1)
-        self.footer_hint = QLabel("双击编辑  /  右键更多")
+        self.footer_hint = QLabel("双击编辑  ·  右键更多")
         self.footer_hint.setObjectName("statusLabel")
         bottom.addWidget(self.footer_hint)
         gap(10, 8)
         maincol.addLayout(bottom)
 
         body.addWidget(content, 1)
-        root.addLayout(body, 1)
-        QApplication.instance().installEventFilter(self)
+        self.toast = effects.Toast(content)
+        app.installEventFilter(self)
         self._date_timer = QTimer(self)
         self._date_timer.setInterval(60_000)
         self._date_timer.timeout.connect(self._update_date)
@@ -935,16 +1089,42 @@ class MainWindow(QMainWindow):
         self._update_date()
         for button in self.findChildren(QAbstractButton):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sync_text = ""
+        self._retheme()
+        theme.notifier.changed.connect(self._retheme)
 
         # 信号
         self.input_edit.returnPressed.connect(self._on_add)
-        self.input_edit.textChanged.connect(lambda t: self.save_btn.setEnabled(bool(t.strip())))
+        self.input_edit.textChanged.connect(self._sync_save_btn)
         self.search_edit.textChanged.connect(lambda _t: self.reload())
         self.list.itemSelectionChanged.connect(self._sync_selection)
 
         sc = QShortcut(QKeySequence.StandardKey.Delete, self.list)
         sc.setContext(Qt.ShortcutContext.WidgetShortcut)
         sc.activated.connect(self._delete_selected)
+
+    def _mark(self, size: int):
+        return mark_pixmap(size, theme.c("accent_hover"), theme.c("accent_press"))
+
+    def _retheme(self, *_args) -> None:
+        """皮肤切换：刷新所有按调色板着色的图标，并重建列表/侧栏。"""
+        text_2, muted = theme.c("text_2"), theme.c("muted")
+        self.titlebar.retheme()
+        self.titlebar.icon.setPixmap(self._mark(18))
+        self.brand_mark.setPixmap(self._mark(32))
+        self.trash_btn.setIcon(ui_icon("trash", text_2, 16))
+        self.settings_btn.setIcon(ui_icon("gear", text_2, 16))
+        self.add_cat_btn.setIcon(ui_icon("plus", muted, 14))
+        self.compose_icon.setPixmap(ui_icon("note", muted, 22).pixmap(22, 22))
+        self.empty_icon.setPixmap(ui_icon("note", muted, 40).pixmap(40, 40))
+        self.trash_back_btn.setIcon(ui_icon("back", theme.c("trash_text"), 14))
+        self._sync_save_btn(self.input_edit.text())
+        self._on_sync_status(self._sync_text)
+        self.composer.update()
+        if hasattr(self, "_all_memos"):
+            self._sidebar_signature = None
+            self.reload()
+
 
     # ---------- 分类 ----------
 
@@ -973,20 +1153,17 @@ class MainWindow(QMainWindow):
         while self.side_rows.count():
             item = self.side_rows.takeAt(0)
             w = item.widget()
-            if w is not None:
+            if w is not None and w is not self.section_header:
                 w.deleteLater()
 
-        all_row = CategoryRow(0, "所有备忘录", len(self._all_memos))
+        all_row = CategoryRow(0, "所有笔记", len(self._all_memos))
         all_row.set_selected(self.selected_category is None and not self.trash_mode)
         all_row.activated.connect(self._on_cat_select)
         self.side_rows.addWidget(all_row)
         if focused_cat == 0:
             QTimer.singleShot(0, all_row, all_row.setFocus)
 
-        section = QLabel("我的分类")
-        section.setObjectName("sectionLabel")
-        section.setContentsMargins(0, 20, 0, 8)
-        self.side_rows.addWidget(section)
+        self.side_rows.addWidget(self.section_header)
         for cat in self._categories:
             row = CategoryRow(cat.id, cat.name, counts.get(cat.id, 0))
             row.set_selected(self.selected_category == cat.id and not self.trash_mode)
@@ -1068,6 +1245,8 @@ class MainWindow(QMainWindow):
     # ---------- 搜索 / 回收站 / 设置 ----------
 
     def _toggle_search(self, on: bool) -> None:
+        if on and self.settings_view is not None:
+            self.close_settings()
         if on:
             self.search_edit.setFocus()
             self.search_edit.selectAll()
@@ -1088,21 +1267,16 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "side"):
             return
         compact = self.width() < 880
-        self.side.setFixedWidth(174 if compact else 214)
-        margin = 20 if compact else 36
-        self.content_layout.setContentsMargins(margin, 20 if compact else 26, margin, 18)
-        self.search_edit.setFixedWidth(170 if compact else 212)
+        self.side.setFixedWidth(188 if compact else 220)
+        margin = 22 if compact else 40
+        self.content_layout.setContentsMargins(margin, 18 if compact else 28, margin, 14 if compact else 16)
+        self.search_edit.setFixedWidth(230 if compact else 340)
         self.page_subtitle.setVisible(not compact)
-        self.workspace_label.setVisible(not compact)
-        self.local_card.setVisible(not compact)
-        self.local_card_gap.changeSize(0, 0 if compact else 8,
-                                      QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        if compact:
-            self.side_layout.setContentsMargins(12, 16, 12, 12)
-        else:
-            self.side_layout.setContentsMargins(16, 24, 16, 16)
+        self.brand_sub.setVisible(not compact)
+        self.side_layout.setContentsMargins(10 if compact else 12, 14 if compact else 18, 10 if compact else 12, 10)
         self.date_label.setVisible(not compact)
         self.footer_hint.setVisible(not compact)
+        self.list_heading.setVisible(not compact)
         self.page_title.setProperty("compact", compact)
         self.page_title.style().unpolish(self.page_title)
         self.page_title.style().polish(self.page_title)
@@ -1110,28 +1284,54 @@ class MainWindow(QMainWindow):
             spacer.changeSize(0, small if compact else normal,
                               QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.content_layout.invalidate()
-
-    def _toggle_trash(self) -> None:
-        self._set_trash(not self.trash_mode)
+        self._set_page_title(self.page_title.toolTip() or self.page_title.text())
 
     def _set_trash(self, on: bool) -> None:
         self.trash_mode = on
-        self.trash_action.setChecked(on)
         self.trash_btn.setChecked(on)
         self.composer.setVisible(not on)
         self.filter_group.setVisible(not on)
-        self.search_edit.setPlaceholderText("搜索回收站" if on else "搜索备忘录")
+        self.search_edit.setPlaceholderText("搜索回收站    Ctrl+F" if on else "搜索笔记    Ctrl+F")
         self.search_edit.setAccessibleName("搜索回收站" if on else "搜索备忘录")
         self.search_edit.blockSignals(True)
         self.search_edit.clear()
         self.search_edit.blockSignals(False)
         self.trash_bar.setVisible(on)
-        self.footer_hint.setText("右键恢复  /  Delete 彻底删除" if on else "双击编辑  /  右键更多")
+        self.footer_hint.setText("右键恢复  ·  Delete 彻底删除" if on else "双击编辑  ·  右键更多")
         self.reload()
 
+    # ---------- 设置整页 ----------
+
     def _open_settings(self) -> None:
-        if self.controller is not None:
-            SettingsDialog(self.controller, self).exec()
+        self.open_settings("general")
+
+    def open_settings(self, page: str = "general") -> None:
+        if self.controller is None:
+            return
+        if not isinstance(page, str):  # 直接连到 triggered(bool) 时
+            page = "general"
+        view = self.settings_view
+        if view is None:
+            view = SettingsView(self.controller, page)
+            view.back_requested.connect(self.close_settings)
+            for button in view.findChildren(QAbstractButton):
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.settings_view = view
+            self.body_stack.addWidget(view)
+        else:
+            view.show_page(page if page in view.pages else "general")
+        self.body_stack.setCurrentWidget(view)
+        self.search_edit.hide()
+        view.setFocus()
+
+    def close_settings(self) -> None:
+        view, self.settings_view = self.settings_view, None
+        self.body_stack.setCurrentIndex(0)
+        self.search_edit.show()
+        if view is not None:
+            self.body_stack.removeWidget(view)
+            view.deleteLater()
+        self.input_edit.setFocus()
 
     # ---------- 同步（仿 Obsidian Sync 插件：导航栏状态菜单） ----------
 
@@ -1156,7 +1356,7 @@ class MainWindow(QMainWindow):
                 lambda: self.controller.sync_now_interactive(self)
             )
         act_setup = menu.addAction("同步设置…")
-        act_setup.triggered.connect(self._open_settings)
+        act_setup.triggered.connect(lambda: self.open_settings("sync"))
         menu.exec(anchor.mapToGlobal(QPoint(0, anchor.height())))
 
     def _on_sync_status(self, text: str) -> None:
@@ -1165,17 +1365,21 @@ class MainWindow(QMainWindow):
         if btn is None:
             return
         btn.setToolTip(text or "多设备同步")
+        self._sync_text = text
         if "失败" in text or "错误" in text or "不可用" in text:
-            color = "#d64541"
+            color = theme.c("danger")
         elif "已同步" in text or "就绪" in text:
-            color = "#2D6550"
+            color = theme.c("accent")
         else:
-            color = "#69766E"
+            color = theme.c("text_2")
         btn.setIcon(ui_icon("sync", color=color, size=14))
 
     # ---------- 数据 ----------
 
     def reload(self) -> None:
+        self._reload_gen += 1
+        self._leaving_ids.clear()
+        flash_id, self._flash_id = self._flash_id, None
         self._refresh_category_data()
         self._rebuild_sidebar()
         query = self.search_edit.text()
@@ -1187,9 +1391,8 @@ class MainWindow(QMainWindow):
             elif self.status_filter == "scheduled":
                 memos = [m for m in memos if m.due_ts is not None]
         self._memos = memos
-        title = "回收站" if self.trash_mode else self._cat_names.get(self.selected_category, "所有备忘录")
-        self.page_title.setText(title)
-        self.page_title.setToolTip(title)
+        title = "回收站" if self.trash_mode else self._cat_names.get(self.selected_category, "所有笔记")
+        self._set_page_title(title)
         self.page_subtitle.setText(
             "暂时告别的记录，也可以重新找回。" if self.trash_mode
             else "把琐事放在这里，把注意力留给生活。"
@@ -1213,6 +1416,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._update_item_heights)
         QTimer.singleShot(0, lambda: sb.setValue(min(pos, sb.maximum())))
         self._sync_selection()
+        flashed = self._card(flash_id) if flash_id is not None else None
+        if flashed is not None:
+            flashed.flash()
+            QTimer.singleShot(0, self.list, lambda: self._scroll_to(flash_id))
 
         if memos:
             self.stack.setCurrentWidget(self.list)
@@ -1235,6 +1442,21 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.stack.widget(1))
         self._update_status(len(memos))
         self.memos_changed.emit()
+
+    def _card(self, memo_id: int) -> MemoItemWidget | None:
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == memo_id:
+                w = self.list.itemWidget(item)
+                return w if isinstance(w, MemoItemWidget) else None
+        return None
+
+    def _scroll_to(self, memo_id: int) -> None:
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == memo_id:
+                self.list.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
+                return
 
     def _sync_item_height(self, memo_id: int, h: int) -> None:
         """卡片高度变化时同步 QListWidgetItem 的尺寸提示。"""
@@ -1260,15 +1482,57 @@ class MainWindow(QMainWindow):
             if isinstance(w, MemoItemWidget):
                 w.set_selected(item is current)
 
+    def _set_page_title(self, title: str) -> None:
+        self.page_title.setToolTip(title)
+        limit = max(120, self.content.width() - 260)
+        self.page_title.setText(self.page_title.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, limit))
+
     def _update_status(self, shown: int) -> None:
-        self.list_heading.setText(f"{'已删除' if self.trash_mode else '最近记录'}  ·  {shown}")
+        self.count_badge.setText(str(shown))
+        self.list_heading.setText("最近删除在前" if self.trash_mode else "按置顶与更新时间排序")
+        sync = self._sync_text if self._sync_text and self._sync_text != "未启用" else "本地存储"
         if self.trash_mode:
             self.status_label.setText(f"回收站 {shown} 条")
             self.trash_title.setText(f"回收站 · {shown} 条备忘录")
         else:
-            self.status_label.setText(f"{shown} 条记录  ·  本地存储")
+            self.status_label.setText(f"{shown} 条记录  ·  {sync}")
 
     # ---------- 操作 ----------
+
+    def _sync_save_btn(self, text: str) -> None:
+        on = bool(text.strip())
+        self.save_btn.setEnabled(on)
+        self.save_btn.setIcon(ui_icon("arrow", theme.c("on_accent" if on else "faint"), 14))
+
+    def _notify(self, text: str, icon: str = "check", action: str | None = None, callback=None) -> None:
+        # 挂件/托盘触发的操作不在隐藏的主窗口里弹提示
+        if self.isVisible() and not self.isMinimized():
+            self.toast.show_message(text, icon, action, callback)
+
+    def _remove_card(self, memo_id: int) -> None:
+        """数据已写入：卡片淡出后再重建列表（重建本身可随时被其他刷新抢先）。"""
+        card = self._card(memo_id)
+        if card is None or not self.isVisible() or not effects.enabled():
+            self.reload()
+            return
+        self._leaving_ids.add(memo_id)
+        card.setEnabled(False)  # 淡出期间屏蔽按钮、右键与双击编辑
+        gen = self._reload_gen
+        # 期间若已有其他刷新（如撤销），淡出结束时不再重复重建，避免打断新状态的高亮
+        effects.fade_widget(card, 1.0, 0.0, effects.NORMAL,
+                            lambda: gen == self._reload_gen and self.reload())
+
+    def _undo_to_todo(self, memo_id: int) -> None:
+        db.restore(memo_id)
+        self._flash_id = memo_id
+        if self.trash_mode:
+            self._set_trash(False)
+        else:
+            self.reload()
+
+    def copy_text(self, text: str) -> None:
+        QApplication.clipboard().setText(text)
+        self._notify("已复制到剪贴板", "copy")
 
     def add_memo_text(
         self,
@@ -1296,6 +1560,7 @@ class MainWindow(QMainWindow):
             )
         except (sqlite3.Error, ValueError):
             return None
+        self._flash_id = mid
         if self.trash_mode:
             self._set_trash(False)
         else:
@@ -1333,19 +1598,41 @@ class MainWindow(QMainWindow):
 
     def toggle_pin(self, memo_id: int) -> None:
         db.toggle_pin(memo_id)
+        self._flash_id = memo_id
         self.reload()
 
     def toggle_done(self, memo_id: int) -> None:
+        if memo_id in self._leaving_ids:
+            return
+        before = next((m for m in db.list_memos() if m.id == memo_id), None)
         db.toggle_done(memo_id)
-        self.reload()
+        if before is None or before.is_done:
+            self.reload()
+            return
+        after = next((m for m in db.list_memos() if m.id == memo_id), None)
+        if after is not None:
+            # 重复任务不进回收站，而是顺延到下一周期
+            self._flash_id = memo_id
+            self.reload()
+            due = f"已顺延至 {nlp_time.format_due(after.due_ts)}" if after.due_ts else "已完成本周期"
+            self._notify(due, "restore")
+            return
+        self._notify("已完成，移入回收站", "check", "撤销", lambda: self._undo_to_todo(memo_id))
+        self._remove_card(memo_id)
 
     def delete_memo(self, memo_id: int) -> None:
+        if memo_id in self._leaving_ids:
+            return
         db.soft_delete(memo_id)
-        self.reload()
+        self._notify("已移到回收站", "trash", "撤销", lambda: self._undo_to_todo(memo_id))
+        self._remove_card(memo_id)
 
     def restore_memo(self, memo_id: int) -> None:
+        if memo_id in self._leaving_ids:
+            return
         db.restore(memo_id)
-        self.reload()
+        self._notify("已恢复到待办", "restore")
+        self._remove_card(memo_id)
 
     def edit_memo(self, memo_id: int, text: str) -> None:
         # 编辑时同样解析时间/标记；只更新识别到的字段，不清空既有属性
@@ -1366,29 +1653,32 @@ class MainWindow(QMainWindow):
             db.edit_memo(memo_id, text, props)
         except (ValueError, sqlite3.Error):
             return
+        self._flash_id = memo_id
         self.reload()
 
     def purge_memo(self, memo_id: int) -> None:
+        if memo_id in self._leaving_ids:
+            return
         if QMessageBox.question(
             self, "彻底删除", "确定要彻底删除这条备忘录吗？此操作不可恢复。"
         ) == QMessageBox.StandardButton.Yes:
             db.purge(memo_id)
-            self.reload()
+            self._notify("已彻底删除", "trash")
+            self._remove_card(memo_id)
 
     def _on_purge_all(self) -> None:
         if QMessageBox.question(
             self, "清空回收站", "确定要清空回收站吗？所有条目将被彻底删除。"
         ) == QMessageBox.StandardButton.Yes:
-            db.purge_all_trash()
+            count = db.purge_all_trash()
+            self._notify(f"已清空回收站 · {count} 条", "trash")
             self.reload()
 
     # ---------- 无边框窗口：边缘缩放 / 标题栏拖动 ----------
 
     def eventFilter(self, obj, e):  # noqa: N802
         if obj is getattr(self, "input_edit", None) and e.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
-            self.composer.setProperty("active", e.type() == QEvent.Type.FocusIn)
-            self.composer.style().unpolish(self.composer)
-            self.composer.style().polish(self.composer)
+            self.composer.set_active(e.type() == QEvent.Type.FocusIn)
         if obj is getattr(self, "search_edit", None) and e.type() == QEvent.Type.KeyPress and e.key() == Qt.Key.Key_Escape:
             self.search_edit.clear()
             (self.list if self.trash_mode else self.input_edit).setFocus()

@@ -334,6 +334,44 @@ class TransportTest(unittest.TestCase):
         # Depth:1 只到直接子项，不含更深的文件
         self.assertNotIn("heads/a.enc", sub)
 
+    def test_jianguoyun_uses_direct_connection_with_system_proxy_fallback(self):
+        import urllib.error
+        import urllib.request
+        proxy = unittest.mock.Mock()
+        direct = unittest.mock.Mock()
+        with unittest.mock.patch.object(urllib.request, "build_opener", side_effect=[proxy, direct]) as build:
+            c = transport.WebDAVClient("https://dav.jianguoyun.com/dav/", "u", "p")
+            self.assertEqual(build.call_args.args[0].proxies, {})
+        req = urllib.request.Request(c.base_url, method="PROPFIND")
+        c._open(req)
+        direct.open.assert_called_once()
+        proxy.open.assert_not_called()
+        direct.open.side_effect = urllib.error.URLError("unreachable")
+        c._open(req)
+        proxy.open.assert_called_once()
+        self.assertIs(c._opener, proxy)
+
+    def test_http_error_does_not_retry_on_proxy(self):
+        import urllib.error
+        c = transport.WebDAVClient("https://dav.jianguoyun.com/dav/", "u", "p")
+        c._opener = unittest.mock.Mock()
+        c._fallback_opener = unittest.mock.Mock()
+        c._opener.open.side_effect = urllib.error.HTTPError(c.base_url, 401, "Unauthorized", {}, None)
+        with self.assertRaises(urllib.error.HTTPError):
+            c._open(unittest.mock.Mock())
+        c._fallback_opener.open.assert_not_called()
+
+    def test_create_dir_encodes_path_and_sends_mkcol(self):
+        c = self._root_client()
+        with unittest.mock.patch.object(c, "_request_url") as request:
+            c.create_dir("我的坚果云/new folder")
+            request.assert_called_once_with("MKCOL", c.base_url + "%E6%88%91%E7%9A%84%E5%9D%9A%E6%9E%9C%E4%BA%91/new%20folder/")
+        for bad in ("", "../x", "a//b", "a\\b"):
+            with self.assertRaises(transport.WebDAVError):
+                c.create_dir(bad)
+        with self.assertRaises(transport.WebDAVError):
+            c.create_dir("err409")
+
     def test_list_dir_rejects_bad_paths(self) -> None:
         c = self._root_client()
         for bad in ("a//b", "a/./b", "../x", "a\\b", "a\x01b"):

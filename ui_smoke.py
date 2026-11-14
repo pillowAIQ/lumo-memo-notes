@@ -20,13 +20,14 @@ from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
-from memo_app import db
+from memo_app import db, effects
 from memo_app.app import CategoryRow, MainWindow, MemoItemWidget, NameDialog
 from memo_app.capture import QuickCapture
 from memo_app.category_dialog import CategoryPickerDialog
 from memo_app.controller import Controller
-from memo_app.settings_dialog import SettingsDialog
+from memo_app.settings_dialog import SettingsView, SyncSettingsPage
 from memo_app.task_dialog import TaskPropsDialog
+from memo_app import theme
 from memo_app.theme import QSS
 from memo_app.widget import TodoWidget
 
@@ -51,13 +52,17 @@ def card(win: MainWindow, memo_id: int) -> MemoItemWidget:
 
 
 class _SyncStub:
-    """SettingsDialog 需要的最小同步服务替身（无网络/无凭据）。"""
+    """设置页需要的最小同步服务替身（无网络/无凭据）。"""
 
     enabled = False
     base_url = "https://dav.jianguoyun.com/dav/"
     remote_dir = "memo-app"
     conflict_mode = "lww"
     status_text = "未启用"
+    directory_cache = {}
+
+    def __init__(self, parent=None):
+        pass
 
     class _Sig:
         def connect(self, *a, **k):
@@ -66,6 +71,10 @@ class _SyncStub:
     status_changed = _Sig()
     conn_tested = _Sig()
     vault_ready = _Sig()
+    synced = _Sig()
+
+    def shutdown(self):
+        pass
 
     def vault_id(self):
         return None
@@ -110,6 +119,7 @@ def check_window_visibility() -> None:
         patch("PySide6.QtCore.QSettings.value", return_value="ctrl+o"),
         patch("pynput.keyboard.Listener"),
         patch.object(Controller, "_check_reminders"),
+        patch("memo_app.sync.service.SyncService", _SyncStub),
     ):
         win = MainWindow()
         ctl = Controller(win)
@@ -251,6 +261,13 @@ def check_ui(app: QApplication) -> None:
     settle()
     assert win.list.count() == 6
     shot(win, "01_main")
+    for skin in ("ink", "lavender"):
+        theme.apply(skin)
+        settle()
+        assert win.list.count() == 6
+        shot(win, f"01_main_{skin}")
+    theme.apply("pine")
+    settle()
     win.input_edit.setFocus()
     win.input_edit.setText("让重要的想法，有一个安静的归处。")
     shot(win, "17_composing")
@@ -261,11 +278,11 @@ def check_ui(app: QApplication) -> None:
     assert win.width() == 680 and win.height() == 520
     assert win.list.horizontalScrollBar().maximum() == 0
     assert win.list.mapTo(win, QPoint(0, 0)).y() < 260
-    assert not win.local_card.isVisible() and not win.workspace_label.isVisible()
+    assert not win.brand_sub.isVisible() and not win.date_label.isVisible()
     for i in range(win.side_rows.count()):
         row = win.side_rows.itemAt(i).widget()
         if isinstance(row, CategoryRow):
-            assert row.mapTo(win, QPoint(0, row.height())).y() <= win.add_cat_btn.mapTo(win, QPoint()).y()
+            assert row.mapTo(win, QPoint(0, row.height())).y() <= win.side_footer.mapTo(win, QPoint()).y()
     shot(win, "02_compact")
     win.resize(original_size)
     settle()
@@ -279,6 +296,7 @@ def check_ui(app: QApplication) -> None:
     added = db.list_memos(query="100%_done")[0].id
     assert not win.input_edit.text() and not win.save_btn.isEnabled()
     assert card(win, added).content_label.textFormat() == Qt.TextFormat.PlainText
+    assert card(win, added)._flash_t > 0 or not effects.enabled()  # new record is briefly highlighted
     QTest.keyClick(win, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
     settle()
     assert win.search_edit.hasFocus()
@@ -326,6 +344,8 @@ def check_ui(app: QApplication) -> None:
     card(win, added).done_btn.click()
     settle()
     assert next(m for m in db.list_memos(trash=True) if m.id == added).is_done
+    assert win.toast.isVisible() and win.toast.label.text().startswith("已完成")
+    assert win.toast.action.isVisible()
     win._set_trash(True)
     settle()
     card(win, added).restore_btn.click()
@@ -335,6 +355,20 @@ def check_ui(app: QApplication) -> None:
     card(win, added).del_btn.click()
     settle()
     assert added in [m.id for m in db.list_memos(trash=True)]
+    assert win.toast.isVisible() and win.toast.action.text() == "撤销"
+    win.toast.action.click()
+    settle()
+    assert added not in [m.id for m in db.list_memos(trash=True)]
+    assert card(win, added)._flash_t > 0 or not effects.enabled()
+    fading = card(win, added)
+    fading.del_btn.click()
+    if effects.enabled():
+        assert not fading.isEnabled()  # card is inert while it fades out
+        win.delete_memo(added)  # a repeated request during fade-out is ignored
+    settle()
+    assert added in [m.id for m in db.list_memos(trash=True)]
+    QTest.qWait(250)
+    assert all(win.list.item(i).data(Qt.ItemDataRole.UserRole) != added for i in range(win.list.count()))
     win.trash_btn.click()
     settle()
     assert win.trash_mode and win.page_title.text() == "回收站"
@@ -417,12 +451,41 @@ def check_ui(app: QApplication) -> None:
         for dialog, name in [
             (TaskPropsDialog(next(m for m in db.list_memos() if m.id == task), win), "09_task_dialog"),
             (CategoryPickerDialog(db.list_categories()[:3], {cats[0]}, win), "10_categories_dialog"),
-            (SettingsDialog(SettingsControllerStub(), win), "11_settings"),
             (NameDialog("新建分类", "分类名称：", win), "12_new_category"),
         ]:
             dialog.show()
             shot(dialog, name)
             dialog.close()
+        # 设置整页：菜单入口直达各分区，Esc 返回笔记
+        assert not win.settings_menu.isEmpty()
+        win.controller = SettingsControllerStub()
+        for page in ("general", "appearance", "hotkeys", "sync", "about"):
+            win.open_settings(page)
+            settle()
+            assert win.body_stack.currentWidget() is win.settings_view
+            assert win.settings_view.current_page() == page
+            assert not win.search_edit.isVisible()
+            shot(win, f"11_settings_{page}")
+        win.resize(680, 520)
+        for page in ("general", "appearance", "hotkeys", "sync", "about"):
+            win.open_settings(page)
+            settle()
+            area = win.settings_view.scroll
+            assert area.widget().minimumSizeHint().width() <= area.viewport().width(), page
+        shot(win, "11_settings_compact")
+        win.resize(original_size)
+        win.open_settings("sync")
+        theme.apply("ink")
+        settle()
+        shot(win, "11_settings_sync_ink")
+        win.open_settings("appearance")
+        shot(win, "11_settings_appearance_ink")
+        theme.apply("pine")
+        QTest.keyClick(win.settings_view, Qt.Key.Key_Escape)
+        settle()
+        assert win.settings_view is None and win.body_stack.currentIndex() == 0
+        assert win.search_edit.isVisible()
+        win.controller = None
 
     capture = QuickCapture()
     capture.show()

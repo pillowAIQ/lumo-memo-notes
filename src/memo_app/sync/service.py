@@ -140,6 +140,8 @@ class SyncService(QObject):
         self._status = "未启用"
         self._inflight = 0  # 已入队/执行中的 job 数（>0 即忙）
         self._setup_busy = False  # setup job 进行中（防重复建库）
+        self._login_candidate = None
+        self.directory_cache = {}
         self._pending = False
         self._pending_mode = "lww"
         self._thread = QThread(self)
@@ -294,6 +296,9 @@ class SyncService(QObject):
         if not account or not app_password:
             self.conn_tested.emit(False, "请先填写账号和应用密码")
             return
+        self._login_candidate = (
+            account, app_password, base_url.strip() or self.base_url,
+        )
         self._enqueue({
             "kind": "test_conn",
             "base_url": base_url.strip() or self.base_url,
@@ -341,10 +346,13 @@ class SyncService(QObject):
 
     def logout(self) -> None:
         """退出登录：清除账号凭据并停用同步（远程目录/库密码保留）。"""
+        self._login_candidate = None
+        self.directory_cache.clear()
         try:
             credentials.clear_credentials()
-        except credentials.CredentialError:
-            pass
+        except credentials.CredentialError as e:
+            self._set_status(f"退出登录失败：{e}")
+            return
         self._settings.setValue("sync_enabled", False)
         self._periodic.stop()
         self._debounce.stop()
@@ -437,8 +445,17 @@ class SyncService(QObject):
         if kind == "setup":
             self._setup_busy = False
         if kind == "test_conn":
-            if res.get("ok"):
-                self.conn_tested.emit(True, "连接成功，坚果云账号可用")
+            candidate = self._login_candidate
+            self._login_candidate = None
+            if res.get("ok") and candidate:
+                account, app_pw, base_url = candidate
+                try:
+                    credentials.save_credentials(account, app_pw)
+                except credentials.CredentialError as e:
+                    self.conn_tested.emit(False, f"连接成功，但账号保存失败：{e}")
+                else:
+                    self._settings.setValue("sync_base_url", base_url)
+                    self.conn_tested.emit(True, "连接成功，账号已安全保存")
             else:
                 self.conn_tested.emit(
                     False, f"连接失败：{res.get('error', '未知错误')}"

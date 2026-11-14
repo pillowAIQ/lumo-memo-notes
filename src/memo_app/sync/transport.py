@@ -172,6 +172,27 @@ class WebDAVClient:
         self.timeout = timeout
         self.max_file = max_file
         self._opener = urllib.request.build_opener(_SafeRedirect)
+        self._fallback_opener = None
+        # 国内坚果云直连，避免绕经系统代理增加数秒延迟；其他 WebDAV
+        # 保持系统代理设置。直连网络失败时仍可回退到系统代理。
+        if parts.hostname.lower() == "dav.jianguoyun.com":
+            self._fallback_opener = self._opener
+            self._opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _SafeRedirect,
+            )
+
+    def _open(self, req):
+        try:
+            return self._opener.open(req, timeout=self.timeout)
+        except urllib.error.HTTPError:
+            # HTTP 错误说明已连到服务器，不切换网络重复请求。
+            raise
+        except urllib.error.URLError:
+            if self._fallback_opener is None:
+                raise
+            self._opener = self._fallback_opener
+            self._fallback_opener = None
+            return self._opener.open(req, timeout=self.timeout)
 
     @staticmethod
     def _validate_root_dir(root_dir: str) -> str:
@@ -285,7 +306,7 @@ class WebDAVClient:
             url, data=data, headers=hdrs, method=method
         )
         try:
-            resp = self._opener.open(req, timeout=self.timeout)
+            resp = self._open(req)
             return resp.status, self._read_capped(resp), dict(resp.headers)
         except urllib.error.HTTPError as e:
             retry = 0.0
@@ -337,7 +358,7 @@ class WebDAVClient:
                 headers={"Authorization": self._auth},
             )
             try:
-                resp = self._opener.open(req, timeout=self.timeout)
+                resp = self._open(req)
                 resp.read(4096)
             except urllib.error.HTTPError as e:
                 try:
@@ -368,7 +389,7 @@ class WebDAVClient:
             },
         )
         try:
-            resp = self._opener.open(req, timeout=self.timeout)
+            resp = self._open(req)
             resp.read(4096)
             # 合规 PROPFIND 响应是 207 multistatus；其他 2xx 不认
             return resp.status == 207
@@ -401,6 +422,17 @@ class WebDAVClient:
             depth=depth,
         )
         return self.parse_multistatus(body)
+
+    def create_dir(self, dir_path: str) -> None:
+        """Create one directory under the WebDAV mount; never create parents."""
+        rel = self._validate_root_dir(dir_path)
+        if not rel:
+            raise WebDAVError("folder name is required")
+        url = self._base_url + "/".join(
+            urllib.parse.quote(s, safe="") for s in rel.split("/")
+        ) + "/"
+        # Do not treat 405/conflict as successful creation of a new directory.
+        self._request_url("MKCOL", url)
 
     def list_dir(self, dir_path: str) -> list[RemoteEntry]:
         """PROPFIND Depth:1 列出 base_url 根下的目录（远程目录选择器用）。

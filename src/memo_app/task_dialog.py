@@ -29,17 +29,20 @@ class TaskPropsDialog(QDialog):
         self.setMinimumWidth(420)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(18)
-        heading = QLabel("让计划井井有条")
+        lay.setContentsMargins(28, 26, 28, 24)
+        lay.setSpacing(16)
+        heading = QLabel("任务属性")
         heading.setObjectName("dialogTitle")
         hint = QLabel("设置截止时间、优先级和提醒，把重要的事放在心上。")
         hint.setObjectName("dialogHint")
         hint.setWordWrap(True)
         lay.addWidget(heading)
         lay.addWidget(hint)
+        lay.addSpacing(4)
         form = QFormLayout()
-        form.setSpacing(10)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(form)
 
         # 截止时间
@@ -58,14 +61,14 @@ class TaskPropsDialog(QDialog):
         )
         self.due_edit.setEnabled(self.due_check.isChecked())
         self.due_check.toggled.connect(self.due_edit.setEnabled)
-        form.addRow("截止", self._due_widget())
+        form.addRow(self._label("截止"), self._due_widget())
 
         # 优先级
         self.prio_combo = QComboBox()
         for p in (0, 1, 2, 3):
             self.prio_combo.addItem(db.PRIORITY_LABELS[p], p)
         self.prio_combo.setCurrentIndex(memo.priority)
-        form.addRow("优先级", self.prio_combo)
+        form.addRow(self._label("优先级"), self.prio_combo)
 
         # 重复（必须先有截止时间才有意义）
         self.recur_combo = QComboBox()
@@ -76,7 +79,7 @@ class TaskPropsDialog(QDialog):
         self.recur_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.recur_combo.setEnabled(self.due_check.isChecked())
         self.due_check.toggled.connect(self.recur_combo.setEnabled)
-        form.addRow("重复", self.recur_combo)
+        form.addRow(self._label("重复"), self.recur_combo)
 
         # 提前提醒（分钟）；无截止时间时禁用
         self.advance_combo = QComboBox()
@@ -99,7 +102,7 @@ class TaskPropsDialog(QDialog):
         self.advance_combo.setCurrentIndex(aidx if aidx >= 0 else 0)
         self.advance_combo.setEnabled(self.due_check.isChecked())
         self.due_check.toggled.connect(self.advance_combo.setEnabled)
-        form.addRow("提醒", self.advance_combo)
+        form.addRow(self._label("提醒"), self.advance_combo)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -109,7 +112,15 @@ class TaskPropsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        lay.addSpacing(6)
         lay.addWidget(buttons)
+
+    @staticmethod
+    def _label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        label.setMinimumWidth(52)
+        return label
 
     def _due_widget(self) -> QWidget:
         w = QWidget()

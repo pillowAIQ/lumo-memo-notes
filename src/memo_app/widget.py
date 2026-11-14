@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import db, nlp_time
+from . import db, effects, nlp_time, theme
 from .db import Memo
 from .icons import ui_icon
 
@@ -36,6 +36,7 @@ class GroupHeader(QWidget):
         self.key = key
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(title)
         self.setFixedHeight(30)
@@ -114,7 +115,7 @@ class TodoWidget(QWidget):
         self._minimized = False
         self.setFixedWidth(300)
         self.setObjectName("todoWidget")
-        self.setStyleSheet(
+        self._qss = (
             """
             /* 面板背景由 paintEvent 手绘（半透明顶层窗口 QSS 背景不生效） */
             QLabel { background: transparent; border: none; }
@@ -126,13 +127,17 @@ class TodoWidget(QWidget):
             QLabel#widgetGroupName { font-size: 12px; font-weight: bold; color: #E2EBD9; }
             QLabel#widgetGroupArrow { font-size: 9px; color: #D3DCCB; }
             QLabel#widgetGroupCount { font-size: 10px; color: #D3DCCB; }
-            GroupHeader { background: transparent; border: 1px solid transparent; border-radius: 4px; }
+            GroupHeader { background: transparent; border: 1px solid transparent; border-radius: 6px; }
+            GroupHeader:hover { background: rgba(209, 224, 196, 18); }
             GroupHeader:focus { background: rgba(209, 224, 196, 24); border-color: #9DB591; }
+            QWidget#widgetRow { background: transparent; border-radius: 6px; }
+            QWidget#widgetRow:hover { background: rgba(209, 224, 196, 16); }
             QPushButton#widgetBtn {
                 border: none; background: transparent; color: #D3DCCB;
                 border-radius: 5px; padding: 0;
             }
             QPushButton#widgetBtn:hover, QPushButton#widgetBtn:focus { background: rgba(209, 224, 196, 35); }
+            QPushButton#widgetBtn:pressed { background: rgba(209, 224, 196, 60); }
             QPushButton#widgetDone {
                 border: 1.5px solid #BFCFB2;
                 border-radius: 9px;
@@ -143,10 +148,12 @@ class TodoWidget(QWidget):
                 border-color: #A7CE99; background: rgba(145, 186, 134, 35);
             }
             QPushButton#widgetDone[done="true"] {
-                background: #2D6550; border-color: #2D6550; color: white;
+                background: @ACCENT@; border-color: @ACCENT@; color: white;
             }
             """
         )
+        self._apply_style()
+        theme.notifier.changed.connect(self._apply_style)
         self._build()
         self._press_pos = None
         self._dragging = False
@@ -155,12 +162,19 @@ class TodoWidget(QWidget):
         # 分组展开状态（会话内记忆，重启默认全部折叠 = 隐私默认）
         self._expanded: set[str] = set()
         self._groups: dict[str, dict] = {}
+        # 已点完成、正在播放打勾反馈的条目：防止重建后重复点击导致来回切换
+        self._pending_done: set[int] = set()
         # 连续点击时合并窗口尺寸调整，避免半透明面板反复重绘卡顿
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(40)
         self._resize_timer.timeout.connect(self.adjustSize)
         self._move_to_corner()
+
+    def _apply_style(self, *_args) -> None:
+        # 挂件始终是深色半透明面板；仅勾选色跟随皮肤强调色（深色皮肤用其深色版本保证白勾对比）
+        accent = theme.c("accent_press" if theme.is_dark() else "accent")
+        self.setStyleSheet(self._qss.replace("@ACCENT@", accent))
 
     # ---------- 构建 ----------
 
@@ -308,12 +322,17 @@ class TodoWidget(QWidget):
         expanded = key in self._expanded
         g["hdr"].set_state(expanded, len(g["memos"]))
         g["body"].setVisible(expanded)
+        if expanded:
+            effects.fade_widget(g["body"], 0.0, 1.0, effects.NORMAL)
         self._resize_timer.start()
 
     def _make_row(self, memo: Memo) -> QWidget:
         row = QWidget()
+        row.setObjectName("widgetRow")
+        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(0, 3, 0, 3)
+        lay.setContentsMargins(4, 3, 4, 3)
         lay.setSpacing(8)
 
         btn = QPushButton()
@@ -323,7 +342,7 @@ class TodoWidget(QWidget):
         btn.setAccessibleName("标记完成")
         btn.setToolTip("标记完成")
         mid = memo.id
-        btn.clicked.connect(lambda _c=False, i=mid: self.done_toggled.emit(i))
+        btn.clicked.connect(lambda _c=False, b=btn, i=mid: self._on_row_done(b, i))
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
 
         markers = []
@@ -353,7 +372,7 @@ class TodoWidget(QWidget):
         label.setObjectName("widgetItem")
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # 单行省略：宽度固定（面板定宽 300，扣除边距/圆圈/间距）
-        label.setFixedWidth(300 - 16 * 2 - 18 - 8 - 24)
+        label.setFixedWidth(300 - 16 * 2 - 18 - 8 - 24 - 8)
         fm = label.fontMetrics()
         label.setText(fm.elidedText(memo.content, Qt.TextElideMode.ElideRight, label.width()))
         text_col.addWidget(label)
@@ -377,6 +396,24 @@ class TodoWidget(QWidget):
             lay.addWidget(pin, 0, Qt.AlignmentFlag.AlignTop)
 
         return row
+
+    def _on_row_done(self, btn: QPushButton, memo_id: int) -> None:
+        if memo_id in self._pending_done:
+            return
+        self._pending_done.add(memo_id)
+        btn.setProperty("done", "true")
+        btn.setIcon(ui_icon("check", "#FFFFFF", 12))
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+        # 先展示打勾，再真正完成（定时器挂在挂件上，行被重建也不会丢失这次点击）
+        QTimer.singleShot(effects.NORMAL if effects.enabled() else 0, self, lambda: self._emit_done(memo_id))
+
+    def _emit_done(self, memo_id: int) -> None:
+        self._pending_done.discard(memo_id)
+        # 等待期间若已在主界面/同步中完成或删除，不再发出（toggle 会把它反向取消完成）
+        current = next((m for m in db.list_memos() if m.id == memo_id), None)
+        if current is not None and not current.is_done:
+            self.done_toggled.emit(memo_id)
 
     # ---------- 显示 / 位置 ----------
 
@@ -402,6 +439,10 @@ class TodoWidget(QWidget):
         p.setPen(QPen(QColor(222, 232, 216, 60), 1.0))
         p.drawPath(path)
         p.end()
+
+    def showEvent(self, e):  # noqa: N802
+        effects.fade_window_in(self, effects.NORMAL)
+        super().showEvent(e)
 
     # ---------- 拖动 ----------
 

@@ -18,8 +18,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QListWidget, QLineEdit, QVBoxLayout, QWidget
 
-from . import db
+from . import db, effects, theme
 from .icons import ui_icon
+
+# 面板四周留给手绘投影的透明边距
+SHADOW = 14
 
 
 class QuickCapture(QWidget):
@@ -35,31 +38,15 @@ class QuickCapture(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(600, 106)
+        self.setFixedSize(600 + SHADOW * 2, 106 + SHADOW * 2)
         self.setObjectName("capture")
-        self.setStyleSheet(
-            """
-            /* 面板背景由 paintEvent 手绘（半透明顶层窗口 QSS 背景不生效） */
-            QLineEdit {
-                border: none;
-                background: transparent;
-                font-size: 16px;
-                padding: 0;
-                color: #283D35;
-            }
-            QLabel { background: transparent; border: none; color: #69766E; font-size: 11px; }
-            QLabel#enterKey { background: #E5ECE0; border-radius: 5px; padding: 5px 9px; color: #2D6550; }
-            """
-        )
-
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 14, 20, 12)
+        lay.setContentsMargins(20 + SHADOW, 14 + SHADOW, 20 + SHADOW, 12 + SHADOW)
         lay.setSpacing(8)
         row = QHBoxLayout()
         row.setSpacing(14)
-        icon = QLabel()
-        icon.setPixmap(ui_icon("note", "#2D6550", 24).pixmap(24, 24))
-        row.addWidget(icon)
+        self.icon = QLabel()
+        row.addWidget(self.icon)
         self.edit = QLineEdit()
         self.edit.setPlaceholderText("让这一刻的想法，留在这里。")
         self.edit.setAccessibleName("快捷记录内容")
@@ -83,29 +70,48 @@ class QuickCapture(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.ToolTip
         )
-        self.popup.setFixedWidth(self.width())
+        self.popup.setFixedWidth(self.width() - SHADOW * 2)
         self.popup.setMaximumHeight(180)
-        self.popup.setStyleSheet(
-            "QListWidget { background: #FCFCF9; border: 1px solid #DCE2D7;"
-            " border-radius: 10px; padding: 4px; }"
-            "QListWidget::item { padding: 9px 14px; border-radius: 6px; color: #42594B; }"
-            "QListWidget::item:selected { background: #DEE8DB; }"
-        )
         self.popup.itemClicked.connect(self._on_popup_click)
         self.popup.hide()
+        self._apply_style()
+        theme.notifier.changed.connect(self._apply_style)
+
+    def _apply_style(self, *_args) -> None:
+        # 面板背景由 paintEvent 手绘（半透明顶层窗口 QSS 背景不生效）
+        t = theme.palette()
+        self.setStyleSheet(
+            f"QLineEdit {{ border: none; background: transparent; font-size: 16px; padding: 0; color: {t['text']};"
+            f" selection-background-color: {t['accent_soft']}; selection-color: {t['text']}; }}"
+            f"QLabel {{ background: transparent; border: none; color: {t['muted']}; font-size: 11px; }}"
+            f"QLabel#enterKey {{ background: {t['accent_soft']}; border-radius: 5px; padding: 5px 9px;"
+            f" color: {t['accent_text']}; font-weight: 600; }}"
+        )
+        self.popup.setStyleSheet(
+            f"QListWidget {{ background: {t['surface']}; border: 1px solid {t['border']};"
+            " border-radius: 10px; padding: 4px; outline: none; }"
+            f"QListWidget::item {{ padding: 9px 14px; border-radius: 6px; color: {t['text_2']}; }}"
+            f"QListWidget::item:hover {{ background: {t['hover']}; }}"
+            f"QListWidget::item:selected {{ background: {t['accent_soft']}; color: {t['accent_text']}; }}"
+        )
+        self.icon.setPixmap(ui_icon("note", t["accent"], 24).pixmap(24, 24))
+        self.update()
 
     # ---------- 绘制 ----------
 
     def paintEvent(self, e):  # noqa: N802
-        """手绘圆角半透明浅色面板。"""
+        """手绘圆角浅色面板 + 向下偏移的柔和投影。"""
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        panel = QRectF(self.rect()).adjusted(SHADOW + 0.5, SHADOW + 0.5, -SHADOW - 0.5, -SHADOW - 0.5)
+        for i in range(SHADOW, 0, -1):
+            shadow = QPainterPath()
+            shadow.addRoundedRect(panel.translated(0, 4).adjusted(-i, -i, i, i), 16 + i, 16 + i)
+            p.fillPath(shadow, theme.qc("shadow", round((1 + 7 * (1 - i / SHADOW) ** 2) * (2 if theme.is_dark() else 1))))
         path = QPainterPath()
-        path.addRoundedRect(
-            QRectF(self.rect()).adjusted(0.5, 0.5, -1.0, -1.0), 16, 16
-        )
-        p.fillPath(path, QColor(250, 252, 248, 250))
-        p.setPen(QPen(QColor("#BBCBB4"), 1.0))
+        path.addRoundedRect(panel, 16, 16)
+        p.fillPath(path, theme.qc("surface", 252))
+        p.setPen(QPen(theme.qc("border_hover"), 1.0))
         p.drawPath(path)
         p.end()
 
@@ -122,6 +128,7 @@ class QuickCapture(QWidget):
         self.edit.clear()
         self.edit.setPlaceholderText("让这一刻的想法，留在这里。")
         self.popup.hide()
+        effects.fade_window_in(self, effects.NORMAL, slide=8)
         self.show()
         self.raise_()
         self._force_activate()
@@ -163,7 +170,7 @@ class QuickCapture(QWidget):
             screen = QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
         x = geo.center().x() - self.width() // 2
-        y = geo.top() + int(geo.height() * 0.18)
+        y = geo.top() + int(geo.height() * 0.18) - SHADOW
         self.move(x, y)
 
     def _submit(self) -> None:
@@ -196,7 +203,7 @@ class QuickCapture(QWidget):
                 for c in cats:
                     self.popup.addItem(c.name)
                 self.popup.setCurrentRow(0)
-                pos = self.mapToGlobal(QPoint(0, self.height() + 6))
+                pos = self.mapToGlobal(QPoint(SHADOW, self.height() - SHADOW + 6))
                 self.popup.move(pos)
                 self.popup.show()
                 return

@@ -27,9 +27,9 @@ class CategoryPickerDialog(QDialog):
         self._checks: dict[int, QCheckBox] = {}
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
-        heading = QLabel("给记录找个归属")
+        lay.setContentsMargins(28, 26, 28, 24)
+        lay.setSpacing(14)
+        heading = QLabel("选择分类")
         heading.setObjectName("dialogTitle")
         hint = QLabel("一条备忘录可以放进多个分类。")
         hint.setObjectName("dialogHint")
@@ -42,7 +42,7 @@ class CategoryPickerDialog(QDialog):
         scroll.setMaximumHeight(300)
         box = QWidget()
         bl = QVBoxLayout(box)
-        bl.setSpacing(6)
+        bl.setSpacing(10)
         bl.setContentsMargins(0, 0, 4, 0)
         if not categories:
             bl.addWidget(QLabel("还没有分类，先在左侧栏新建一个吧"))

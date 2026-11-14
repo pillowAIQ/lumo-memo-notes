@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from . import db
 from . import nlp_time
+from . import theme
 from .capture import QuickCapture
 from .icons import make_icon
 from .widget import TodoWidget
@@ -360,19 +361,18 @@ class Controller(QObject):
             self.a_capture.setText(f"快捷记录   {self.hotkey_display()}")
         return True
 
-    def open_settings(self) -> None:
+    def open_settings(self, page: str = "general") -> None:
         self.show_main()
-        from .settings_dialog import SettingsDialog
-        SettingsDialog(self, self.win).exec()
+        self.win.open_settings(page)
 
     # ---------- 托盘 ----------
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(make_icon(22), self)
-        self.tray.setToolTip("memo 备忘录")
+        self.tray.setToolTip(f"{theme.APP_NAME} · {theme.APP_NAME_EN}")
 
         menu = QMenu()
-        a_open = menu.addAction("打开主界面")
+        a_open = menu.addAction(f"打开{theme.APP_NAME}")
         self.a_capture = menu.addAction(f"快捷记录   {self.hotkey_display()}")
         a_settings = menu.addAction("设置…")
         self.a_widget = menu.addAction("自动显示桌面挂件")
@@ -383,7 +383,7 @@ class Controller(QObject):
 
         a_open.triggered.connect(self.show_main)
         self.a_capture.triggered.connect(self.capture.toggle)
-        a_settings.triggered.connect(self.open_settings)
+        a_settings.triggered.connect(lambda: self.open_settings("general"))
         self.a_widget.toggled.connect(self._on_widget_toggled)
         a_quit.triggered.connect(self.quit)
 
@@ -396,6 +396,12 @@ class Controller(QObject):
         if hasattr(self, "a_widget"):
             with QSignalBlocker(self.a_widget):
                 self.a_widget.setChecked(on)
+        # 设置页开着时同步开关状态（托盘菜单或挂件 × 也会改这个选项）
+        view = getattr(self.win, "settings_view", None)
+        switch = getattr(view.pages.get("general"), "widget_switch", None) if view is not None else None
+        if switch is not None and switch.isChecked() != on:
+            with QSignalBlocker(switch):
+                switch.setChecked(on)
         self._sync_widget_visibility()
 
     def eventFilter(self, obj, event):  # noqa: N802
@@ -448,7 +454,7 @@ class Controller(QObject):
                 continue
             db.mark_notified(m.id)
             self.tray.showMessage(
-                "memo 提醒",
+                f"{theme.APP_NAME}提醒",
                 f"{m.content[:40]}\n{nlp_time.format_due(m.due_ts)}",
                 QSystemTrayIcon.MessageIcon.Information,
                 5000,
