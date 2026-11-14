@@ -187,7 +187,17 @@ def enqueue(
     payload: dict,
 ) -> None:
     """写入 outbox + 更新本地修订状态。必须在业务写入的同一事务内调用。"""
+    # rev_ts = max(墙钟, 已知修订+ε)：保证本机新修订在逻辑上
+    # 严格晚于已应用的远端修订——否则时钟偏慢的设备会产生
+    # "因果更新但版本更小"的修订被对端永久拒收（SYNC-001）
     rev_ts = time.time()
+    cur = conn.execute(
+        "SELECT rev_ts FROM sync_entity_state"
+        " WHERE entity = ? AND entity_uuid = ?",
+        (entity, entity_uuid),
+    ).fetchone()
+    if cur is not None and cur["rev_ts"] >= rev_ts:
+        rev_ts = float(cur["rev_ts"]) + 0.001
     wid = _writer_id(conn)
     # rev_seq：同 writer 同 rev_ts（时钟粒度/回拨）时的因果序。
     # 用 sqlite_sequence（AUTOINCREMENT 保证单调）而非 MAX(seq)+1，

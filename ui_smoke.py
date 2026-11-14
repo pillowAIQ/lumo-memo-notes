@@ -50,9 +50,46 @@ def card(win: MainWindow, memo_id: int) -> MemoItemWidget:
     raise AssertionError(f"Memo {memo_id} not visible")
 
 
-class SettingsStub:
-    def hotkey_display(self) -> str:
+class _SyncStub:
+    """SettingsDialog 需要的最小同步服务替身（无网络/无凭据）。"""
+
+    enabled = False
+    base_url = "https://dav.jianguoyun.com/dav/"
+    status_text = "未启用"
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    status_changed = _Sig()
+
+    def vault_id(self):
+        return None
+
+    def save_config(self, **kw):
+        return True
+
+    def queue_setup(self, *a, **k):
+        pass
+
+    def sync_now(self, *a, **k):
+        pass
+
+    def notify_change(self):
+        pass
+
+
+class SettingsControllerStub:
+    sync = _SyncStub()
+
+    def hotkey_display(self):
         return "Ctrl+O"
+
+    def describe_pressed(self):
+        return "Ctrl+O"
+
+    def set_hotkey(self, spec):
+        return True
 
 
 def check_window_visibility() -> None:
@@ -361,15 +398,21 @@ def check_ui(app: QApplication) -> None:
     win.resize(original_size)
     settle()
 
-    for dialog, name in [
-        (TaskPropsDialog(next(m for m in db.list_memos() if m.id == task), win), "09_task_dialog"),
-        (CategoryPickerDialog(db.list_categories()[:3], {cats[0]}, win), "10_categories_dialog"),
-        (SettingsDialog(SettingsStub(), win), "11_settings"),
-        (NameDialog("新建分类", "分类名称：", win), "12_new_category"),
-    ]:
-        dialog.show()
-        shot(dialog, name)
-        dialog.close()
+    # 设置对话框会读系统凭据管理器——冒烟测试必须隔离，
+    # 避免真实账号信息进入截图/测试环境
+    with patch(
+        "memo_app.sync.credentials.load_credentials",
+        return_value=(None, None),
+    ):
+        for dialog, name in [
+            (TaskPropsDialog(next(m for m in db.list_memos() if m.id == task), win), "09_task_dialog"),
+            (CategoryPickerDialog(db.list_categories()[:3], {cats[0]}, win), "10_categories_dialog"),
+            (SettingsDialog(SettingsControllerStub(), win), "11_settings"),
+            (NameDialog("新建分类", "分类名称：", win), "12_new_category"),
+        ]:
+            dialog.show()
+            shot(dialog, name)
+            dialog.close()
 
     capture = QuickCapture()
     capture.show()

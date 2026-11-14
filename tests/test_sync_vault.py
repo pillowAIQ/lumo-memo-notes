@@ -15,9 +15,10 @@ from test_sync_transport import FakeWebDAV  # noqa: E402
 from http.server import ThreadingHTTPServer  # noqa: E402
 
 from memo_app import db  # noqa: E402
-from memo_app.sync import crypto, service, store  # noqa: E402
+from memo_app.sync import credentials, crypto, service, store  # noqa: E402
 from memo_app.sync.transport import WebDAVClient  # noqa: E402
 from memo_app.sync import vault_setup  # noqa: E402
+from unittest import mock  # noqa: E402
 
 VID = "12345678-1234-1234-1234-123456789abc"
 VAULT_PW = "test-vault-password-123"
@@ -38,6 +39,13 @@ class VaultSetupTest(unittest.TestCase):
     def setUp(self):
         FakeWebDAV.store = {}
         os.environ.pop("MEMO_APP_DATA_DIR", None)
+        # SYNC-004：run_job 成功路径会写真凭据——测试必须隔离，
+        # 绝不触碰 Windows Credential Manager 里的正式项
+        p = mock.patch.object(
+            credentials, "save_vault_password", lambda pw: None
+        )
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         os.environ.pop("MEMO_APP_DATA_DIR", None)

@@ -15,7 +15,6 @@ import json
 from . import crypto, protocol
 from .transport import (
     NotFoundError,
-    PreconditionFailedError,
     WebDAVClient,
     WebDAVError,
 )

@@ -162,7 +162,7 @@ class SettingsDialog(QDialog):
 
         sync_btn_row = QHBoxLayout()
         self.sync_now_btn = QPushButton("立即同步")
-        self.sync_now_btn.clicked.connect(svc.sync_now)
+        self.sync_now_btn.clicked.connect(self._on_sync_now)
         sync_btn_row.addWidget(self.sync_now_btn)
         sync_btn_row.addStretch(1)
         lay.addLayout(sync_btn_row)
@@ -195,15 +195,34 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
+    def _on_sync_now(self) -> None:
+        """手动同步前让用户选择冲突策略。"""
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("同步冲突处理")
+        box.setText("两台设备同时修改同一条备忘录时如何处理？")
+        box.setInformativeText(
+            "此选择只影响本次手动同步；后台自动同步默认后写覆盖。"
+        )
+        b_lww = box.addButton("后写覆盖（推荐）", QMessageBox.ButtonRole.AcceptRole)
+        b_keep = box.addButton("保留冲突副本", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_lww:
+            self.ctl.sync.sync_now("lww")
+        elif clicked is b_keep:
+            self.ctl.sync.sync_now("keep")
+
     def _on_save(self) -> None:
         if not self.ctl.set_hotkey(self.hotkey_edit.text()):
             self.tip.setText("快捷键格式无法识别，请重新录制（需修饰键+普通键）")
             self.tip.setStyleSheet("color: #d64541; font-size: 11px;")
             return
-        self._save_sync()
-        self.accept()
+        if self._save_sync():
+            self.accept()
 
-    def _save_sync(self) -> None:
+    def _save_sync(self) -> bool:
         svc = self.ctl.sync
         account = self.sync_account.text().strip()
         app_pw = self.sync_app_pw.text()
@@ -217,10 +236,10 @@ class SettingsDialog(QDialog):
         if enabled:
             if not account:
                 self.sync_status.setText("错误：请填写坚果云账号")
-                return
+                return False
             if vault_pw and len(vault_pw) < 6:
                 self.sync_status.setText("错误：同步库密码至少 6 位")
-                return
+                return False
             wants_setup = bool(vault_pw)
             if self.vault_join.isChecked():
                 vid = self.vault_id_edit.text().strip().lower()
@@ -228,28 +247,35 @@ class SettingsDialog(QDialog):
                     uuidlib.UUID(vid)
                 except ValueError:
                     self.sync_status.setText("错误：同步库 ID 格式不正确")
-                    return
+                    return False
                 vid = str(uuidlib.UUID(vid))  # 规范化格式
                 if bound_vid and bound_vid != vid:
                     self.sync_status.setText(
                         f"错误：本机已绑定同步库 {bound_vid[:8]}…，"
                         "不能静默切换到其他库"
                     )
-                    return
+                    return False
+                if not vault_pw and bound_vid is None:
+                    # 未绑定 + 加入模式 + 无库密码 = 不完整，不能放行；
+                    # 已绑定同库（bound_vid == vid）无需重复验证，放行
+                    self.sync_status.setText(
+                        "错误：加入已有同步库需要填写同步库密码"
+                    )
+                    return False
             elif wants_setup:
                 if bound_vid:
                     self.sync_status.setText(
                         "错误：本机已绑定同步库，不要重复新建；"
                         "如需换库请先备份数据"
                     )
-                    return
+                    return False
                 vid = str(uuidlib.uuid4())  # 新建库：生成 vault_id
             elif self.vault_id_edit.text().strip() and not bound_vid:
                 # 填了库 ID 但没填库密码：加入不完整，不能静默降级
                 self.sync_status.setText(
                     "错误：加入已有同步库需要填写同步库密码"
                 )
-                return
+                return False
 
         if not svc.save_config(
             enabled=enabled,
@@ -258,10 +284,11 @@ class SettingsDialog(QDialog):
             account=account,
             app_password=app_pw,
         ):
-            return  # 凭据保存失败，状态栏已提示
+            return False  # 凭据保存失败，状态栏已提示
         if enabled and vid and vault_pw:
             # 建库/加入（网络在工作线程；成功后才保存库密码）
             mode = "join" if self.vault_join.isChecked() else "create"
             svc.queue_setup(mode, vid, vault_pw)
         elif enabled:
             svc.sync_now()
+        return True

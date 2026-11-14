@@ -63,7 +63,10 @@ def run_job(job: dict) -> dict:
         allow_http=bool(job.get("allow_http")),
     )
     mk, _ = vault_setup.open_remote_vault(client, vault_pw)
-    eng = engine.Engine(client, mk, vault_id)
+    eng = engine.Engine(
+        client, mk, vault_id,
+        conflict_mode=job.get("conflict_mode", "lww"),
+    )
     stats = eng.sync_once()
     return {"ok": True, "kind": kind, "stats": stats}
 
@@ -97,6 +100,7 @@ class SyncService(QObject):
         self._status = "未启用"
         self._running = False
         self._pending = False
+        self._pending_mode = "lww"
         self._thread = QThread(self)
         self._worker = _Worker()
         self._worker.moveToThread(self._thread)
@@ -111,6 +115,10 @@ class SyncService(QObject):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
         self._debounce.timeout.connect(lambda: self.request_sync())
+        # 重启恢复：已启用同步时周期调度必须立即恢复，
+        # 不能依赖用户重新打开设置（SYNC-003）
+        if self.enabled:
+            self._periodic.start()
         QTimer.singleShot(STARTUP_DELAY_MS, self._maybe_autostart)
 
     # ---------- 状态查询 ----------
@@ -201,8 +209,11 @@ class SyncService(QObject):
 
     # ---------- 同步触发 ----------
 
-    def request_sync(self) -> None:
-        """请求一轮同步；运行中则合并为结束后补一次。"""
+    def request_sync(self, conflict_mode: str = "lww") -> None:
+        """请求一轮同步；运行中则合并为结束后补一次。
+
+        conflict_mode: "lww" 后写覆盖 / "keep" 保留冲突副本。
+        """
         if not self.enabled:
             return
         try:
@@ -221,7 +232,11 @@ class SyncService(QObject):
             self._set_status("错误：凭据不完整，请检查设置")
             return
         if self._running:
+            # 记录本次请求的冲突策略，任务结束后补跑时保留；
+            # keep 优先——用户显式选择的保留语义不被自动 lww 覆盖
             self._pending = True
+            if conflict_mode == "keep" or self._pending_mode != "keep":
+                self._pending_mode = conflict_mode
             return
         self._enqueue({
             "kind": "sync",
@@ -229,6 +244,7 @@ class SyncService(QObject):
             "account": account,
             "app_password": app_pw,
             "vault_password": vault_pw,
+            "conflict_mode": conflict_mode,
         })
 
     def notify_change(self) -> None:
@@ -251,10 +267,10 @@ class SyncService(QObject):
         if has_work:
             self._debounce.start()
 
-    def sync_now(self) -> None:
+    def sync_now(self, conflict_mode: str = "lww") -> None:
         """手动立即同步（忽略防抖，仍走工作线程）。"""
         self._debounce.stop()
-        self.request_sync()
+        self.request_sync(conflict_mode)
 
     # ---------- 内部 ----------
 
@@ -273,13 +289,19 @@ class SyncService(QObject):
             if kind == "sync":
                 s = res.get("stats", {})
                 ts = datetime.now().strftime("%H:%M")
+                bad = s.get("bad_ops", 0)
+                copies = s.get("conflict_copies", 0)
+                suffix = f"（{bad} 条数据异常已跳过）" if bad else ""
+                if copies:
+                    suffix += f"（{copies} 个冲突副本已保留）"
                 self._set_status(
                     f"已同步 {ts}（拉取 {s.get('pulled', 0)} 批 / "
                     f"应用 {s.get('applied_ops', 0)} 条 / "
-                    f"发布 {s.get('published', 0)} 批）"
+                    f"发布 {s.get('published', 0)} 批）{suffix}"
                 )
-                if s.get("applied_ops", 0) > 0:
-                    # 远端数据落库后通知 UI 刷新（编辑缓冲由 reload 保护）
+                if s.get("applied_ops", 0) > 0 or copies > 0:
+                    # 远端数据/冲突副本落库后通知 UI 刷新
+                    # （编辑缓冲由 reload 保护）
                     self.synced.emit()
             else:
                 self._set_status("同步库已就绪")
@@ -291,7 +313,9 @@ class SyncService(QObject):
             logger.warning("sync %s failed: %s", kind, err)
         if self._pending:
             self._pending = False
-            self.request_sync()
+            mode = self._pending_mode
+            self._pending_mode = "lww"
+            self.request_sync(mode)
 
     def shutdown(self) -> None:
         self._periodic.stop()

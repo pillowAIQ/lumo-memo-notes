@@ -16,15 +16,14 @@ master_key 由调用方从 vault.json 解开后传入。
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from .. import db
 from . import crypto, protocol, store
-from .transport import (
-    NotFoundError,
-    PreconditionFailedError,
-    WebDAVError,
-)
+from .transport import NotFoundError, WebDAVError
+
+logger = logging.getLogger(__name__)
 
 MAX_OPS_PER_BATCH = protocol.MAX_OPS_PER_BATCH
 MAX_BATCHES_PER_SYNC = 20          # 单轮发布上限，余量留给下轮
@@ -36,10 +35,22 @@ class SyncError(Exception):
 
 
 class Engine:
-    def __init__(self, client, master_key: bytes, vault_id: str):
+    def __init__(self, client, master_key: bytes, vault_id: str,
+                 conflict_mode: str = "lww"):
+        if conflict_mode not in ("lww", "keep"):
+            raise ValueError("conflict_mode must be 'lww' or 'keep'")
         self.client = client
         self.master_key = master_key
         self.vault_id = vault_id
+        self.conflict_mode = conflict_mode
+        self._conflict_copies = 0
+        # 事务内副本计数：随事务提交才计入 stats，回滚不虚报
+        self._txn_copies = 0
+        # keep 模式：落败修订候选按实体聚合（每实体只留最大修订），
+        # pull 结束后统一落副本，避免顺序旧版本刷屏。
+        # 注意：候选仅存内存——flush 失败即丢弃（best-effort），
+        # 生产环境 Engine 每轮重建，不做跨轮重试
+        self._conflict_pending: dict = {}
         with db.db() as conn:
             self.writer_id = store.profile_writer_id(conn)
 
@@ -54,10 +65,12 @@ class Engine:
         """
         stats = {
             "pulled": 0, "applied_ops": 0, "bad_ops": 0,
-            "published": 0, "bootstrapped": 0,
+            "published": 0, "bootstrapped": 0, "conflict_copies": 0,
         }
         p, a, b = self._pull()
         stats["pulled"], stats["applied_ops"], stats["bad_ops"] = p, a, b
+        self._flush_conflict_copies()
+        stats["conflict_copies"] = self._conflict_copies
         pub, boot = self._publish()
         stats["published"], stats["bootstrapped"] = pub, boot
         return stats
@@ -124,20 +137,19 @@ class Engine:
             batch = protocol.validate_batch(batch)
             if batch["writer_id"] != wid or batch["seq"] != seq:
                 raise SyncError("batch identity mismatch")
-            a, bd = self._apply_batch(batch)
+            a, bd = self._apply_batch(batch, wid, seq, head_seq)
             ops += a
             bad += bd
             batches += 1
-            with db.db() as conn:
-                store.set_peer_state(
-                    conn, wid, head_seq=head_seq, applied_seq=seq
-                )
         return batches, ops, bad
 
     # ---------- 应用（LWW，不触发 outbox 回传） ----------
 
-    def _apply_batch(self, batch: dict) -> tuple[int, int]:
+    def _apply_batch(
+        self, batch: dict, wid: str, seq: int, head_seq: int
+    ) -> tuple[int, int]:
         applied = bad = 0
+        self._txn_copies = 0
         with db.db() as conn:
             # 立即取写锁：LWW 判定与落库在同一事务内，
             # 不会被并发 GUI 写插入造成状态回退
@@ -150,26 +162,59 @@ class Engine:
                     if self._apply_op(conn, op):
                         applied += 1
                     conn.execute("RELEASE sync_op")
-                except (KeyError, TypeError, ValueError,
-                        OverflowError, sqlite3.Error):
+                except sqlite3.IntegrityError:
+                    # 数据冲突类错误：确定性跳过（各端行为一致）
                     conn.execute("ROLLBACK TO sync_op")
                     conn.execute("RELEASE sync_op")
-                    # 毒化 op 不拖垮整条日志：记录为已见并跳过，
-                    # 所有端确定性地忽略同一 op
                     bad += 1
-                    try:
-                        store.record_remote_state(
-                            conn,
-                            entity=op.get("entity", "memo"),
-                            entity_uuid=op.get("entity_uuid", ""),
-                            rev_ts=float(op.get("rev_ts", 0.0)),
-                            rev_seq=int(op.get("rev_seq", 0)),
-                            writer_id=op.get("writer_id", ""),
-                            deleted=(op.get("op") == "delete"),
-                        )
-                    except (sqlite3.Error, ValueError, OverflowError):
-                        pass
+                    self._record_skipped(conn, op)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    # 远端数据校验失败：确定性跳过
+                    conn.execute("ROLLBACK TO sync_op")
+                    conn.execute("RELEASE sync_op")
+                    bad += 1
+                    self._record_skipped(conn, op)
+                except sqlite3.Error:
+                    # 执行类故障（锁/中断/IO）：可重试——
+                    # 回滚该 op 后整体中止本批，applied_seq 不推进，
+                    # 下轮同步从断点重试，绝不当作坏数据跳过
+                    conn.execute("ROLLBACK TO sync_op")
+                    conn.execute("RELEASE sync_op")
+                    raise
+            # 批次应用与游标推进同一事务：要么一起提交要么一起回滚，
+            # 崩溃重放不会让 keep 模式的冲突副本重复生成
+            store.set_peer_state(
+                conn, wid, head_seq=head_seq, applied_seq=seq
+            )
+        self._conflict_copies += self._txn_copies
         return applied, bad
+
+    @staticmethod
+    def _record_skipped(conn, op: dict) -> None:
+        """确定性失败的 op 记录修订状态防重复处理——但只允许
+        推进不允许回退（落败 op 失败时不能把状态写小）。"""
+        try:
+            entity = op.get("entity", "memo")
+            uuid = op.get("entity_uuid", "")
+            inc = (
+                float(op.get("rev_ts", 0.0)),
+                str(op.get("writer_id", "")),
+                int(op.get("rev_seq", 0)),
+            )
+            cur = store.remote_state(conn, entity, uuid)
+            if not store.lww_newer(inc, cur):
+                return
+            store.record_remote_state(
+                conn,
+                entity=entity,
+                entity_uuid=uuid,
+                rev_ts=inc[0],
+                rev_seq=inc[2],
+                writer_id=inc[1],
+                deleted=(op.get("op") == "delete"),
+            )
+        except (sqlite3.Error, ValueError, OverflowError, TypeError):
+            pass
 
     def _apply_op(self, conn: sqlite3.Connection, op: dict) -> bool:
         entity, uuid = op["entity"], op["entity_uuid"]
@@ -179,9 +224,25 @@ class Engine:
             int(op.get("rev_seq", 0)),
         )
         cur = store.remote_state(conn, entity, uuid)
+        # 当前已知修订由本机撰写 = 即将被覆盖的是本地内容；
+        # 远端撰写的修订意味着本地行只是镜像，不算冲突
+        local_authored = cur is not None and cur[1] == self.writer_id
         if not store.lww_newer(inc, cur):
-            return False  # 已有相同或更新的修订：幂等丢弃
+            # keep 模式：落败的并发 memo 修订记为冲突候选，
+            # pull 结束后每实体只落修订最大的一个副本
+            if (
+                self.conflict_mode == "keep"
+                and op["op"] == "upsert"
+                and entity == "memo"
+            ):
+                prev = self._conflict_pending.get(uuid)
+                if prev is None or inc > prev[0]:
+                    self._conflict_pending[uuid] = (inc, op)
+            return False  # 幂等丢弃：不改变实体状态
         if op["op"] == "delete":
+            # keep 模式：远端删除胜出也要保住本地版本
+            if self.conflict_mode == "keep" and local_authored:
+                self._local_conflict_copy(conn, uuid)
             self._apply_delete(conn, entity, uuid)
             store.record_remote_state(
                 conn, entity=entity, entity_uuid=uuid,
@@ -190,6 +251,10 @@ class Engine:
             )
             return True
         if entity == "memo":
+            # keep 模式：远端胜出会覆盖本机撰写的修订——先把
+            # 本地版本快照为冲突副本，再应用远端（双向都不丢）
+            if self.conflict_mode == "keep" and local_authored:
+                self._local_conflict_copy(conn, uuid)
             self._apply_memo(conn, uuid, op["data"])
         else:
             self._apply_category(conn, uuid, op["data"])
@@ -307,6 +372,136 @@ class Engine:
                 )
             else:
                 store.add_pending_link(conn, uuid, cu)
+
+    def _flush_conflict_copies(self) -> None:
+        """把本轮收集的落败候选落为冲突副本（每实体一条）。
+
+        best-effort：落库失败仅记日志并丢弃候选，
+        绝不能因此阻塞主同步流程。
+        """
+        pending = self._conflict_pending
+        self._conflict_pending = {}
+        if not pending:
+            return
+        self._txn_copies = 0
+        try:
+            with db.db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for _uuid, (_inc, op) in pending.items():
+                    self._apply_conflict_copy(conn, op)
+        except sqlite3.Error:
+            logger.warning("conflict copy flush failed, copies dropped")
+            return
+        self._conflict_copies += self._txn_copies
+
+    def _apply_conflict_copy(self, conn, op: dict) -> None:
+        """keep 模式：把落败的远端 memo 修订存为本地冲突副本。
+
+        新 uuid、本地专属（不入 outbox 不回传）；内容加冲突标记，
+        分类归属尽量保留（分类未到时同样走 pending_links 不需要——
+        副本本身是本地实体，直接尽力解析即可）。
+        """
+        d = op.get("data") or {}
+        if not isinstance(d.get("content"), str):
+            return
+        self._insert_conflict_copy(
+            conn,
+            content="【冲突副本】" + d["content"],
+            is_pinned=d.get("is_pinned"), is_done=False,
+            created_at=d.get("created_at") or "",
+            updated_at=d.get("updated_at") or "",
+            deleted_at=d.get("deleted_at"),
+            due_ts=d.get("due_ts"), priority=d.get("priority", 0),
+            recur=d.get("recur"), remind_advance=d.get("remind_advance", 0),
+            category_uuids=d.get("category_uuids") or [],
+        )
+        self._txn_copies += 1
+
+    def _local_conflict_copy(self, conn, uuid: str) -> None:
+        """keep 模式：远端修订即将覆盖本地行，先快照本地版本。"""
+        row = conn.execute(
+            "SELECT * FROM memos WHERE uuid = ?", (uuid,)
+        ).fetchone()
+        if row is None:
+            return
+        cats = [
+            r["uuid"]
+            for r in conn.execute(
+                "SELECT c.uuid AS uuid FROM memo_categories mc"
+                " JOIN categories c ON c.id = mc.category_id"
+                " WHERE mc.memo_id = ?", (row["id"],)
+            )
+        ]
+        self._insert_conflict_copy(
+            conn,
+            content="【冲突副本】" + row["content"],
+            is_pinned=row["is_pinned"], is_done=0,
+            created_at=row["created_at"], updated_at=row["updated_at"],
+            deleted_at=row["deleted_at"],
+            due_ts=row["due_ts"], priority=row["priority"],
+            recur=row["recur"], remind_advance=row["remind_advance"],
+            category_uuids=cats,
+        )
+        self._txn_copies += 1
+
+    @staticmethod
+    def _copy_text(v) -> str | None:
+        return v if isinstance(v, str) else None
+
+    @staticmethod
+    def _copy_int(v, default: int = 0) -> int:
+        """远端数据类型收敛：非整数/bool/超 int64 一律回退默认值，
+        防止畸形字段在 SQL 绑定时抛 InterfaceError 卡死同步。"""
+        if isinstance(v, bool):
+            return default
+        try:
+            n = int(v)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return n if -(1 << 62) < n < (1 << 62) else default
+
+    def _insert_conflict_copy(
+        self, conn, *, content: str, is_pinned, is_done: int,
+        created_at, updated_at, deleted_at,
+        due_ts, priority, recur, remind_advance, category_uuids,
+    ) -> int:
+        # 入参可能来自远端 JSON（类型未深校验）——全部收敛后再绑定
+        due = self._copy_int(due_ts, -1)
+        # 与主路径一致：priority 只接受 0-3
+        prio = self._copy_int(priority)
+        prio = prio if 0 <= prio <= 3 else 0
+        new_uuid = store.new_uuid()
+        cur = conn.execute(
+            "INSERT INTO memos(uuid, content, is_pinned, is_done,"
+            " created_at, updated_at, deleted_at, due_ts, priority,"
+            " recur, remind_advance) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                new_uuid, content, 1 if is_pinned else 0,
+                1 if is_done else 0,
+                self._copy_text(created_at) or "",
+                self._copy_text(updated_at) or "",
+                self._copy_text(deleted_at),
+                due if due >= 0 else None,
+                prio,
+                self._copy_text(recur),
+                self._copy_int(remind_advance),
+            ),
+        )
+        mid = int(cur.lastrowid)
+        cats = category_uuids if isinstance(category_uuids, list) else []
+        for cu in cats:
+            if not isinstance(cu, str):
+                continue
+            cat = conn.execute(
+                "SELECT id FROM categories WHERE uuid = ?", (cu,)
+            ).fetchone()
+            if cat is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO memo_categories"
+                    "(memo_id, category_id) VALUES (?, ?)",
+                    (mid, cat["id"]),
+                )
+        return mid
 
     def _apply_category(self, conn, uuid: str, d: dict) -> None:
         if not isinstance(d.get("name"), str) or not isinstance(
@@ -444,18 +639,26 @@ class Engine:
         return row_id, seq, blob, outbox_seqs
 
     def _upload_batch(self, seq: int, blob: bytes) -> None:
-        """上传 commit；同路径已存在时校验字节一致（重试幂等）。"""
+        """上传 commit；同路径已存在时校验字节一致（重试幂等）。
+
+        双保险（SYNC-005）：PUT 前 exists 预检——同 seq 不同内容直接
+        报错绝不覆盖；PUT 后回读校验——服务端忽略 If-None-Match
+        导致内容不符时响亮失败（无法撤销覆盖但能立即发现）。
+        """
         path = self._commit_rel(self.writer_id, seq)
-        try:
-            self.client.put(path, blob, create_only=True)
-            return
-        except PreconditionFailedError:
-            pass
-        # 已存在：必须与持久化 blob 逐字节一致，否则是序号冲突
-        existing = self.client.get(path)
-        if existing != blob:
+        if self.client.exists(path):
+            existing = self.client.get(path)
+            if existing != blob:
+                raise SyncError(
+                    f"commit conflict at seq {seq}: remote content differs"
+                )
+            return  # 同一批次重试：已在远端
+        self.client.put(path, blob, create_only=True)
+        # 写后回读：检测服务端忽略条件写或应答异常
+        if self.client.get(path) != blob:
             raise SyncError(
-                f"commit conflict at seq {seq}: remote content differs"
+                f"commit verify failed at seq {seq}:"
+                " remote content mismatch after PUT"
             )
 
     def _upload_head(self, seq: int) -> None:

@@ -28,7 +28,7 @@ MK = crypto.generate_master_key()
 class _Device:
     """一台模拟设备：独立数据目录 + 独立 writer + 独立 engine。"""
 
-    def __init__(self, port: int, name: str):
+    def __init__(self, port: int, name: str, conflict_mode: str = "lww"):
         self.dir = tempfile.TemporaryDirectory()
         os.environ["MEMO_APP_DATA_DIR"] = self.dir.name
         db.init_db()
@@ -36,7 +36,7 @@ class _Device:
             f"http://127.0.0.1:{port}/dav/", "u", "p",
             vault_id=VID, allow_http=True, timeout=5,
         )
-        self.eng = engine.Engine(self.client, MK, VID)
+        self.eng = engine.Engine(self.client, MK, VID, conflict_mode)
         self.name = name
 
     def sync(self):
@@ -251,7 +251,10 @@ class EngineTest(unittest.TestCase):
                  "data": {}},
             ],
         }
-        applied, bad = eng._apply_batch(bad_batch)
+        applied, bad = eng._apply_batch(
+            bad_batch, bad_batch["writer_id"], bad_batch["seq"],
+            bad_batch["seq"],
+        )
         self.assertEqual(bad, 1)
         self.assertEqual(applied, 1)  # delete op 正常应用
 
@@ -314,6 +317,138 @@ class EngineTest(unittest.TestCase):
                 "SELECT COUNT(*) c FROM sync_pending_links"
             ).fetchone()["c"]
             self.assertEqual(pend, 0)
+
+
+    def test_clock_skew_still_converges(self) -> None:
+        """SYNC-001：对端时钟偏快导致 rev_ts 虚高时，本机后续编辑
+        必须被逻辑抬升，顺序修改仍能收敛。"""
+        a, b = self._dev("A"), self._dev("B")
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        mid = db.add_memo("原始")
+        a.sync(); b.sync()
+        # 模拟 A 时钟偏快 500s：把 A 侧已知修订抬高（等价于
+        # B 拉到一个"未来"的 rev_ts）
+        uuid = db.list_memos()[0].uuid
+        os.environ["MEMO_APP_DATA_DIR"] = b.dir.name
+        with db.db() as conn:
+            conn.execute(
+                "UPDATE sync_entity_state SET rev_ts = rev_ts + 500"
+                " WHERE entity_uuid = ?", (uuid,))
+            bumped = conn.execute(
+                "SELECT rev_ts FROM sync_entity_state"
+                " WHERE entity_uuid = ?", (uuid,)).fetchone()["rev_ts"]
+        bmid = next(m.id for m in b.memos() if m.uuid == uuid)
+        db.update_content(bmid, "B的迟到编辑")
+        # B 的新 rev_ts 必须 > 被抬高的已知修订（逻辑抬升生效）
+        with db.db() as conn:
+            row = conn.execute(
+                "SELECT rev_ts FROM sync_outbox ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+        self.assertGreater(row["rev_ts"], bumped)
+        a.sync(); b.sync(); a.sync()
+        ac = next(m.content for m in a.memos() if m.uuid == uuid)
+        self.assertEqual(ac, "B的迟到编辑")
+
+    def test_commit_conflict_detected_not_overwritten(self) -> None:
+        """SYNC-005：同 seq 不同内容的远端 commit 绝不被覆盖。"""
+        a, _b = self._dev("A"), self._dev("B")
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        db.add_memo("冲突测试")
+        # 预置同 writer seq=1 但内容不同的 commit
+        with db.db() as conn:
+            wid = store.profile_writer_id(conn)
+        bad_path = f"/dav/memo-sync/{VID}/commits/{wid}/1.enc"
+        from test_sync_transport import FakeWebDAV
+        FakeWebDAV.store[bad_path] = b"different-content"
+        from memo_app.sync.engine import SyncError
+        with self.assertRaises(SyncError):
+            a.sync()
+        # 原对象未被破坏
+        self.assertEqual(FakeWebDAV.store[bad_path], b"different-content")
+
+    def test_keep_mode_preserves_conflict_copy(self) -> None:
+        """keep 冲突模式：落败的远端修订存为【冲突副本】本地备忘。"""
+        a = self._dev("A")
+        b = _Device(self.port, "B", conflict_mode="keep")
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        mid = db.add_memo("共享条目")
+        a.sync(); b.sync()
+        uuid = db.list_memos()[0].uuid
+        # 双方离线各自修改
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        db.update_content(mid, "A的版本")
+        os.environ["MEMO_APP_DATA_DIR"] = b.dir.name
+        bmid = next(m.id for m in b.memos() if m.uuid == uuid)
+        db.update_content(bmid, "B的版本")
+        a.sync()
+        b.sync()  # B 拉 A 的修改：落败版本应存为冲突副本
+        b_memos = b.memos()
+        copies = [m for m in b_memos if m.content.startswith("【冲突副本】")]
+        canonical = [
+            m for m in b_memos if not m.content.startswith("【冲突副本】")
+        ]
+        self.assertEqual(len(canonical), 1)   # 正主只有一条
+        self.assertEqual(len(copies), 1)      # 落败版本恰好一个副本
+        # 副本内容 = 落败版本正文 + 标记，且不带回收站/完成态
+        self.assertIn("冲突副本", copies[0].content)
+        self.assertFalse(copies[0].is_done)
+
+    def test_keep_mode_mirror_updates_no_copies(self) -> None:
+        """keep 模式：本地无编辑时远端顺序更新不产冲突副本——
+        本地行只是镜像，不算冲突。"""
+        a = self._dev("A")
+        b = _Device(self.port, "B", conflict_mode="keep")
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        mid = db.add_memo("共享条目")
+        a.sync(); b.sync()
+        for txt in ("v2", "v3"):
+            os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+            db.update_content(mid, txt)
+            a.sync()
+        os.environ["MEMO_APP_DATA_DIR"] = b.dir.name
+        b.sync()
+        copies = [
+            m for m in b.memos() if m.content.startswith("【冲突副本】")
+        ]
+        self.assertEqual(copies, [])
+        self.assertEqual(len(b.memos()), 1)
+        self.assertEqual(b.memos()[0].content, "v3")
+
+    def test_keep_mode_remote_delete_preserves_local(self) -> None:
+        """keep 模式：远端删除胜出时，本机撰写的版本存为副本。"""
+        a = self._dev("A")
+        b = _Device(self.port, "B", conflict_mode="keep")
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        mid = db.add_memo("将被删除")
+        a.sync(); b.sync()
+        uuid = db.list_memos()[0].uuid
+        # B 先离线修改并发布
+        os.environ["MEMO_APP_DATA_DIR"] = b.dir.name
+        bmid = next(m.id for m in b.memos() if m.uuid == uuid)
+        db.update_content(bmid, "B的未删版本")
+        b.sync()
+        # 把 B 的已知修订调旧，保证 A 的删除修订确定性胜出
+        # （避免同秒 rev_ts 平局落到 writer_id 字典序）
+        with db.db() as conn:
+            conn.execute(
+                "UPDATE sync_entity_state SET rev_ts = rev_ts - 100"
+                " WHERE entity_uuid = ?", (uuid,))
+        # A 拉取 B 的修改后硬删（delete 修订时间更晚，必胜）
+        os.environ["MEMO_APP_DATA_DIR"] = a.dir.name
+        amid = next(m.id for m in a.memos() if m.uuid == uuid)
+        db.purge(amid)
+        a.sync()
+        # B 再同步：删除胜出，本地版本应留冲突副本
+        os.environ["MEMO_APP_DATA_DIR"] = b.dir.name
+        b.sync()
+        b_memos = b.memos()
+        copies = [m for m in b_memos if m.content.startswith("【冲突副本】")]
+        canonical = [
+            m for m in b_memos if not m.content.startswith("【冲突副本】")
+        ]
+        self.assertEqual(canonical, [])          # 正主被删除
+        self.assertEqual(len(copies), 1)         # 本地版本留了副本
+        self.assertIn("B的未删版本", copies[0].content)
 
 
 if __name__ == "__main__":
