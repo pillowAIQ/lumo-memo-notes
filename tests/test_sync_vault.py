@@ -89,38 +89,46 @@ class VaultSetupTest(unittest.TestCase):
             vault_setup.create_vault(c, VID, wid, "another-pw")
 
     def test_run_job_full_flow_two_devices(self) -> None:
-        """run_job 全链路：A 建库->写->同步；B 加入->同步->拿到数据。"""
+        """run_job 全链路：A 初始化(自动创建)->写->同步；
+        B 同目录初始化(自动加入)->同步->拿到数据。"""
         da, db_ = tempfile.mkdtemp(), tempfile.mkdtemp()
         base = f"http://127.0.0.1:{self.port}/dav/"
+        remote = "memo-e2e"
 
-        # A：建库
+        # A：初始化——远端无 vault.json，自动创建
         self._mk(da)
         r = service.run_job({
-            "kind": "setup_create", "base_url": base,
+            "kind": "setup", "base_url": base, "remote_dir": remote,
             "account": "u", "app_password": "p",
-            "vault_password": VAULT_PW, "vault_id": VID, "allow_http": True,
+            "vault_password": VAULT_PW, "allow_http": True,
         })
         self.assertTrue(r["ok"], r)
+        vid_a = r["vault_id"]
+        # 数据落在用户自选远程目录下
+        self.assertIn(
+            f"/dav/{remote}/vault.json", FakeWebDAV.store
+        )
         os.environ["MEMO_APP_DATA_DIR"] = da
         db.add_memo("服务层测试数据", cat_name="服务分类")
         r = service.run_job({
-            "kind": "sync", "base_url": base,
+            "kind": "sync", "base_url": base, "remote_dir": remote,
             "account": "u", "app_password": "p",
             "vault_password": VAULT_PW, "allow_http": True,
         })
         self.assertTrue(r["ok"], r)
         self.assertGreaterEqual(r["stats"]["published"], 1)
 
-        # B：加入同一库
+        # B：同一远程目录初始化——检测到 vault.json 自动加入
         self._mk(db_)
         r = service.run_job({
-            "kind": "setup_join", "base_url": base,
+            "kind": "setup", "base_url": base, "remote_dir": remote,
             "account": "u", "app_password": "p",
-            "vault_password": VAULT_PW, "vault_id": VID, "allow_http": True,
+            "vault_password": VAULT_PW, "allow_http": True,
         })
         self.assertTrue(r["ok"], r)
+        self.assertEqual(r["vault_id"], vid_a)  # vault_id 从 vault.json 读出
         r = service.run_job({
-            "kind": "sync", "base_url": base,
+            "kind": "sync", "base_url": base, "remote_dir": remote,
             "account": "u", "app_password": "p",
             "vault_password": VAULT_PW, "allow_http": True,
         })
@@ -135,21 +143,22 @@ class VaultSetupTest(unittest.TestCase):
         da = tempfile.mkdtemp()
         self._mk(da)
         base = f"http://127.0.0.1:{self.port}/dav/"
+        remote = "memo-e2e-wp"
         service.run_job({
-            "kind": "setup_create", "base_url": base,
+            "kind": "setup", "base_url": base, "remote_dir": remote,
             "account": "u", "app_password": "p",
-            "vault_password": VAULT_PW, "vault_id": VID, "allow_http": True,
+            "vault_password": VAULT_PW, "allow_http": True,
         })
-        # 同库错密码 join 必须失败（run_job 直接调用会抛异常，
+        # 同库错密码加入必须失败（run_job 直接调用会抛异常，
         # 生产路径由 _Worker._run 捕获转成错误结果）
         db2 = tempfile.mkdtemp()
         self._mk(db2)
         with self.assertRaises(Exception):
             service.run_job({
-                "kind": "setup_join", "base_url": base,
+                "kind": "setup", "base_url": base, "remote_dir": remote,
                 "account": "u", "app_password": "p",
                 "vault_password": "wrong-Password-1",
-                "vault_id": VID, "allow_http": True,
+                "allow_http": True,
             })
 
     def test_run_job_test_conn(self) -> None:

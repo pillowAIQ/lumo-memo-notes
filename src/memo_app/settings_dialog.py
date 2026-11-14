@@ -1,21 +1,22 @@
-"""设置对话框：呼出快捷键 + 坚果云同步配置。"""
+"""设置对话框：呼出快捷键 + 坚果云同步配置（仿 Obsidian Sync）。"""
 from __future__ import annotations
-
-import uuid as uuidlib
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
+
+from .remote_dir_dialog import RemoteDirDialog
+from .sync.transport import WebDAVError
 
 
 class SettingsDialog(QDialog):
@@ -105,13 +106,22 @@ class SettingsDialog(QDialog):
             self.record_btn.setChecked(False)
             self._on_record_toggled(False)
 
-    # ---------- 同步设置（分步引导 + 实时反馈） ----------
+    # ---------- 同步设置（仿 Obsidian Sync：提醒/账号/通用） ----------
 
     def _build_sync_section(self, lay) -> None:
         svc = self.ctl.sync
         sep = QLabel("同步（坚果云 WebDAV + 端到端加密）")
         sep.setObjectName("dialogTitle")
         lay.addWidget(sep)
+
+        # ── 备份提醒 ────────────────────────────────────
+        warn = QLabel(
+            "⚠ 注意：同步过程会修改或删除本地数据，"
+            "建议在同步前备份重要文件。"
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color: #b8860b; font-size: 11px;")
+        lay.addWidget(warn)
 
         self.sync_enabled = QCheckBox("启用多设备同步")
         self.sync_enabled.setChecked(svc.enabled)
@@ -130,8 +140,23 @@ class SettingsDialog(QDialog):
             lb.setObjectName("dialogTitle")
             lay.addWidget(lb)
 
-        # ── 第 1 步：连接坚果云 ──────────────────────────
-        _step("第 1 步 · 连接坚果云账号")
+        # ── 账号设置 ────────────────────────────────────
+        _step("账号")
+        mode = QLabel("登录方式：账号 + 应用密码（坚果云第三方应用密码）")
+        mode.setObjectName("dialogHint")
+        lay.addWidget(mode)
+
+        # 已登录状态行（有凭据时显示）
+        self.login_row = QWidget()
+        lr = QHBoxLayout(self.login_row)
+        lr.setContentsMargins(0, 0, 0, 0)
+        lr.setSpacing(8)
+        self.login_label = QLabel("")
+        lr.addWidget(self.login_label, 1)
+        self.logout_btn = QPushButton("退出登录")
+        self.logout_btn.clicked.connect(self._on_logout)
+        lr.addWidget(self.logout_btn)
+        lay.addWidget(self.login_row)
 
         self.sync_url = QLineEdit(svc.base_url)
         self.sync_url.setPlaceholderText("https://dav.jianguoyun.com/dav/")
@@ -147,10 +172,10 @@ class SettingsDialog(QDialog):
         self.sync_app_pw = QLineEdit()
         self.sync_app_pw.setEchoMode(QLineEdit.EchoMode.Password)
         self.sync_app_pw.setPlaceholderText(
-            "第三方应用密码（坚果云 → 账户信息 → 安全选项 生成）"
+            "第三方应用密码（留空则沿用已保存的）"
         )
         pw_row.addWidget(self.sync_app_pw, 1)
-        self.test_btn = QPushButton("测试连接")
+        self.test_btn = QPushButton("检查连接")
         self.test_btn.clicked.connect(self._on_test_conn)
         pw_row.addWidget(self.test_btn)
         lay.addLayout(pw_row)
@@ -159,46 +184,57 @@ class SettingsDialog(QDialog):
         self.conn_result.setWordWrap(True)
         lay.addWidget(self.conn_result)
 
-        # ── 第 2 步：创建或加入同步库 ─────────────────────
-        _step("第 2 步 · 创建或加入同步库")
+        # ── 通用设置 ────────────────────────────────────
+        _step("通用")
+
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(8)
+        dir_row.addWidget(QLabel("远程目录"))
+        self.remote_dir_edit = QLineEdit("/" + svc.remote_dir if svc.remote_dir else "/")
+        self.remote_dir_edit.setPlaceholderText("/我的坚果云/memo")
+        dir_row.addWidget(self.remote_dir_edit, 1)
+        self.browse_btn = QPushButton("浏览…")
+        self.browse_btn.clicked.connect(self._on_browse)
+        dir_row.addWidget(self.browse_btn)
+        lay.addLayout(dir_row)
 
         self.vault_pw = QLineEdit()
         self.vault_pw.setEchoMode(QLineEdit.EchoMode.Password)
         self.vault_pw.setPlaceholderText(
-            "同步库密码（加密密钥，两台设备必须相同，务必牢记）"
+            "同步库密码（端到端加密密钥，两台设备必须相同，务必牢记）"
         )
         _row("同步库密码", self.vault_pw)
 
-        vault_row = QHBoxLayout()
-        vault_row.setSpacing(8)
-        self.vault_new = QRadioButton("新建同步库")
-        self.vault_join = QRadioButton("加入已有同步库")
-        self.vault_new.setChecked(True)
-        vault_row.addWidget(self.vault_new)
-        vault_row.addWidget(self.vault_join)
-        vault_row.addStretch(1)
-        lay.addLayout(vault_row)
-
-        self.vault_id_edit = QLineEdit()
-        self.vault_id_edit.setPlaceholderText(
-            "同步库 ID（另一台设备的设置里可复制给你）"
-        )
-        self.vault_id_edit.setEnabled(False)
-        _row("同步库 ID", self.vault_id_edit)
-        self.vault_join.toggled.connect(
-            lambda on: self.vault_id_edit.setEnabled(on)
-        )
-        self.vault_new.toggled.connect(lambda _on: self._sync_setup_label())
-        self.vault_join.toggled.connect(lambda _on: self._sync_setup_label())
-
         setup_row = QHBoxLayout()
         setup_row.addStretch(1)
-        self.setup_btn = QPushButton("创建同步库")
+        self.setup_btn = QPushButton("初始化同步库")
+        self.setup_btn.setToolTip(
+            "远程目录已有同步库则加入；没有则创建新库"
+        )
         self.setup_btn.clicked.connect(self._on_setup)
         setup_row.addWidget(self.setup_btn)
         lay.addLayout(setup_row)
 
-        # 库就绪信息（vault ID + 复制 + 存放位置说明）
+        strat_row = QHBoxLayout()
+        strat_row.setSpacing(8)
+        strat_row.addWidget(QLabel("冲突解决策略"))
+        self.conflict_combo = QComboBox()
+        self.conflict_combo.addItem("后写覆盖（推荐）", "lww")
+        self.conflict_combo.addItem("保留冲突副本", "keep")
+        idx = self.conflict_combo.findData(svc.conflict_mode)
+        if idx >= 0:
+            self.conflict_combo.setCurrentIndex(idx)
+        strat_row.addWidget(self.conflict_combo, 1)
+        lay.addLayout(strat_row)
+        strat_hint = QLabel(
+            "两台设备同时修改同一条备忘录时的处理方式；"
+            "点标题栏「同步 → 立即同步」时也可以临时选择。"
+        )
+        strat_hint.setObjectName("dialogHint")
+        strat_hint.setWordWrap(True)
+        lay.addWidget(strat_hint)
+
+        # 库就绪信息（已绑定时显示远程目录说明）
         self.vault_box = QWidget()
         vb = QVBoxLayout(self.vault_box)
         vb.setContentsMargins(0, 0, 0, 0)
@@ -206,26 +242,11 @@ class SettingsDialog(QDialog):
         self.vault_info = QLabel("")
         self.vault_info.setWordWrap(True)
         vb.addWidget(self.vault_info)
-        copy_row = QHBoxLayout()
-        copy_row.addStretch(1)
-        self.copy_vid_btn = QPushButton("复制库 ID")
-        self.copy_vid_btn.clicked.connect(self._copy_vault_id)
-        copy_row.addWidget(self.copy_vid_btn)
-        vb.addLayout(copy_row)
         self.vault_box.hide()
         lay.addWidget(self.vault_box)
-        self._vault_id = ""
-        self._setup_pending = False  # 建库/加入 job 进行中
-        # 异步任务期间锁定的输入控件
-        self._sync_inputs = [
-            self.sync_enabled, self.sync_url, self.sync_account,
-            self.sync_app_pw, self.test_btn, self.vault_pw,
-            self.vault_new, self.vault_join, self.vault_id_edit,
-            self.copy_vid_btn,
-        ]
 
-        # ── 第 3 步：状态 ────────────────────────────────
-        _step("第 3 步 · 同步状态")
+        # ── 状态 ────────────────────────────────────────
+        _step("同步状态")
         self.sync_status = QLabel(svc.status_text)
         self.sync_status.setObjectName("dialogHint")
         self.sync_status.setWordWrap(True)
@@ -234,21 +255,24 @@ class SettingsDialog(QDialog):
         svc.conn_tested.connect(self._on_conn_tested)
         svc.vault_ready.connect(self._on_vault_ready)
 
+        self._vault_id = ""
+        self._setup_pending = False  # 初始化 job 进行中
+        # 异步任务期间锁定的输入控件
+        self._sync_inputs = [
+            self.sync_enabled, self.sync_url, self.sync_account,
+            self.sync_app_pw, self.test_btn, self.vault_pw,
+            self.remote_dir_edit, self.browse_btn,
+            self.conflict_combo, self.logout_btn,
+        ]
+
         cur_vid = svc.vault_id()
         if cur_vid:
             self._show_vault_ready(cur_vid, announce=False)
-
-        try:
-            from .sync import credentials
-            acc, _pw = credentials.load_credentials() or (None, None)
-        except Exception:
-            acc = None
-        if acc:
-            self.sync_account.setText(acc)
+        self._refresh_login_state()
 
         hint = QLabel(
-            "依次完成第 1、2 步即可开始同步；之后全自动，"
-            "也可在主界面标题栏「同步」按钮手动触发。"
+            "填好账号后点「检查连接」验证；再选远程目录、设同步库密码，"
+            "点「初始化同步库」——远程已有库会自动加入，没有会自动创建。"
             "同步库密码遗忘则无法找回加密数据。"
         )
         hint.setObjectName("dialogHint")
@@ -257,30 +281,21 @@ class SettingsDialog(QDialog):
 
     # ---------- 同步引导动作 ----------
 
-    def _sync_setup_label(self) -> None:
-        if not self._vault_id:  # 已绑定库时保持"已绑定"文案
-            self.setup_btn.setText(
-                "加入同步库"
-                if self.vault_join.isChecked()
-                else "创建同步库"
-            )
-
     def _set_sync_pending(self, on: bool) -> None:
-        """建库/加入进行中锁定同步输入，防止表单与实际 job 不一致。"""
+        """初始化进行中锁定同步输入，防止表单与实际 job 不一致。"""
         self._setup_pending = on
         for w in self._sync_inputs:
             w.setEnabled(not on)
-        # 解锁后恢复单选状态对应的库 ID 可用性
-        self.vault_id_edit.setEnabled(
-            (not on) and self.vault_join.isChecked()
-        )
         if on:
             self.setup_btn.setEnabled(False)
             self.setup_btn.setText("正在连接坚果云…")
+        elif not self._vault_id:
+            self.setup_btn.setEnabled(True)
+            self.setup_btn.setText("初始化同步库")
 
     def _on_test_conn(self) -> None:
         self.test_btn.setEnabled(False)
-        self.test_btn.setText("测试中…")
+        self.test_btn.setText("检查中…")
         self.conn_result.setText("")
         self.ctl.sync.test_connection(
             self.sync_account.text().strip(),
@@ -289,8 +304,8 @@ class SettingsDialog(QDialog):
         )
 
     def _on_conn_tested(self, ok: bool, msg: str) -> None:
-        # pending 时按钮虽 disabled 但文本也要复位，避免滞留"测试中…"
-        self.test_btn.setText("测试连接")
+        # pending 时按钮虽 disabled 但文本也要复位，避免滞留"检查中…"
+        self.test_btn.setText("检查连接")
         if not self._setup_pending:
             self.test_btn.setEnabled(True)
         self.conn_result.setText(("✓ " if ok else "✗ ") + msg)
@@ -300,7 +315,7 @@ class SettingsDialog(QDialog):
 
     def _on_status_text(self, text: str) -> None:
         self.sync_status.setText(text)
-        # 建库/加入 job 失败（网络/凭据）：解锁输入允许重试
+        # 初始化 job 失败（网络/凭据）：解锁输入允许重试
         failed = (
             text.startswith("同步失败")
             or text.startswith("错误")
@@ -308,10 +323,65 @@ class SettingsDialog(QDialog):
         )
         if failed and self._setup_pending:
             self._set_sync_pending(False)
-            self.setup_btn.setEnabled(True)
-            self._sync_setup_label()
+
+    def _refresh_login_state(self) -> None:
+        """按凭据管理器状态刷新"已登录"行（仿 Obsidian 账号区）。"""
+        from .sync import credentials
+        try:
+            acc, _pw = credentials.load_credentials()
+        except Exception:
+            acc = None
+        if acc:
+            self.login_label.setText(f"已登录：{acc}")
+            self.login_row.show()
+            if not self.sync_account.text().strip():
+                self.sync_account.setText(acc)
+        else:
+            self.login_row.hide()
+
+    def _on_logout(self) -> None:
+        self.ctl.sync.logout()
+        self.sync_enabled.setChecked(False)
+        self._refresh_login_state()
+        self.sync_status.setText("已退出登录")
+
+    def _on_browse(self) -> None:
+        """打开远程目录选择器；需要账号凭据（字段或已存）。"""
+        account = self.sync_account.text().strip()
+        app_pw = self.sync_app_pw.text()
+        if not app_pw:
+            from .sync import credentials
+            try:
+                acc, pw = credentials.load_credentials()
+            except Exception:
+                acc = pw = None
+            if pw and acc and (
+                not account or acc.casefold() == account.casefold()
+            ):
+                account = account or acc
+                app_pw = pw
+        if not account or not app_pw:
+            self.sync_status.setText("错误：请先填写账号和应用密码")
+            return
+        try:
+            dlg = RemoteDirDialog(
+                self.sync_url.text().strip()
+                or "https://dav.jianguoyun.com/dav/",
+                account,
+                app_pw,
+                self.remote_dir_edit.text().strip("/"),
+                self,
+            )
+        except WebDAVError as e:
+            # 构造时同步校验 base_url/凭据格式，非法输入直接报错
+            self.sync_status.setText(f"错误：{e}")
+            return
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            rd = dlg.result_dir()
+            self.remote_dir_edit.setText("/" + rd if rd else "/")
 
     def _on_setup(self) -> None:
+        """初始化同步库：远端有 vault.json 自动加入，没有自动创建。"""
         svc = self.ctl.sync
         account = self.sync_account.text().strip()
         app_pw = self.sync_app_pw.text()
@@ -319,17 +389,21 @@ class SettingsDialog(QDialog):
         if not account:
             self.sync_status.setText("错误：请填写坚果云账号")
             return
-        # 账号变更但应用密码留空：queue_setup 会用旧账号凭据建库，
-        # 必须先挡住（save_config 也只在账号一致时保留旧密码）
+        # 应用密码留空仅当"已存凭据属于同一账号"才可沿用；
+        # 首次使用或账号变更必须重填，否则 save_config 不落凭据
+        # 但 enabled 已持久化，会留下"已启用却无凭据"的半状态
         if not app_pw:
             from .sync import credentials
             try:
-                old_acc, _ = credentials.load_credentials()
+                old_acc, old_pw = credentials.load_credentials()
             except Exception:
-                old_acc = None
-            if old_acc and old_acc.casefold() != account.casefold():
+                old_acc = old_pw = None
+            if not (
+                old_pw and old_acc
+                and old_acc.casefold() == account.casefold()
+            ):
                 self.sync_status.setText(
-                    "错误：账号已变更，请重新填写应用密码"
+                    "错误：请填写应用密码（首次使用或账号变更时必填）"
                 )
                 return
         if not vault_pw:
@@ -340,55 +414,33 @@ class SettingsDialog(QDialog):
         if len(vault_pw) < 6:
             self.sync_status.setText("错误：同步库密码至少 6 位")
             return
-        bound_vid = svc.vault_id()
-        if self.vault_join.isChecked():
-            vid = self.vault_id_edit.text().strip().lower()
-            try:
-                vid = str(uuidlib.UUID(vid))
-            except ValueError:
-                self.sync_status.setText("错误：同步库 ID 格式不正确")
-                return
-            if bound_vid and bound_vid != vid:
-                self.sync_status.setText(
-                    f"错误：本机已绑定同步库 {bound_vid[:8]}…，"
-                    "不能静默切换到其他库"
-                )
-                return
-            if bound_vid == vid:
-                self.sync_status.setText("本机已绑定该同步库，无需重复加入")
-                return
-            mode = "join"
-        else:
-            if bound_vid:
-                self.sync_status.setText(
-                    "错误：本机已绑定同步库，不要重复新建；"
-                    "如需换库请先备份数据"
-                )
-                return
-            vid = str(uuidlib.uuid4())
-            mode = "create"
-        # 先保存配置（启用同步+凭据），再排队建库/加入
+        if svc.vault_id():
+            self.sync_status.setText("本机已绑定同步库，无需重复初始化")
+            return
+        # 先保存配置（启用同步+凭据+远程目录+冲突策略），再排队初始化
         if not svc.save_config(
             enabled=True,
             base_url=self.sync_url.text().strip()
             or "https://dav.jianguoyun.com/dav/",
             account=account,
             app_password=app_pw,
+            remote_dir=self.remote_dir_edit.text(),
+            conflict_mode=self.conflict_combo.currentData(),
         ):
             return
         self.sync_enabled.setChecked(True)
-        if not svc.queue_setup(mode, vid, vault_pw):
+        if not svc.queue_setup(vault_pw):
             return  # 凭据缺失，状态栏已提示；不进入 pending
         self._set_sync_pending(True)
-        self.sync_status.setText("正在连接坚果云并设置同步库，请稍候…")
+        self.sync_status.setText("正在连接坚果云并初始化同步库，请稍候…")
 
     def _show_vault_ready(self, vid: str, announce: bool = True) -> None:
         self._vault_id = vid
+        rd = "/" + self.ctl.sync.remote_dir if self.ctl.sync.remote_dir else "/"
         self.vault_info.setText(
-            f"同步库已就绪\n库 ID：{vid}\n"
-            "数据会同步到坚果云的 memo-sync 目录"
-            "（可在坚果云客户端/网页端看到），"
-            "另一台设备用相同库 ID + 库密码加入即可。"
+            f"同步库已绑定\n远程目录：{rd}\n"
+            "数据会同步到坚果云该目录（可在坚果云客户端/网页端看到），"
+            "另一台设备选相同远程目录 + 相同同步库密码即可加入。"
         )
         self.vault_box.show()
         self.setup_btn.setEnabled(False)
@@ -399,16 +451,6 @@ class SettingsDialog(QDialog):
     def _on_vault_ready(self, vid: str) -> None:
         self._set_sync_pending(False)
         self._show_vault_ready(str(vid))
-
-    def _copy_vault_id(self) -> None:
-        from PySide6.QtWidgets import QApplication
-        QApplication.clipboard().setText(self._vault_id)
-        self.copy_vid_btn.setText("已复制 ✓")
-        # context 重载：对话框销毁后 lambda 不再触发
-        QTimer.singleShot(
-            1500, self.copy_vid_btn,
-            lambda: self.copy_vid_btn.setText("复制库 ID"),
-        )
 
     def _on_save(self) -> None:
         if not self.ctl.set_hotkey(self.hotkey_edit.text()):
@@ -432,16 +474,19 @@ class SettingsDialog(QDialog):
         if enabled and not account:
             self.sync_status.setText("错误：请填写坚果云账号（第 1 步）")
             return False
-        # 与 _on_setup 同理：账号变更+应用密码留空会静默沿用旧凭据
+        # 与 _on_setup 同理：应用密码留空仅当已存凭据属于同一账号
         if enabled and not app_pw:
             from .sync import credentials
             try:
-                old_acc, _ = credentials.load_credentials()
+                old_acc, old_pw = credentials.load_credentials()
             except Exception:
-                old_acc = None
-            if old_acc and old_acc.casefold() != account.casefold():
+                old_acc = old_pw = None
+            if not (
+                old_pw and old_acc
+                and old_acc.casefold() == account.casefold()
+            ):
                 self.sync_status.setText(
-                    "错误：账号已变更，请重新填写应用密码"
+                    "错误：请填写应用密码（首次使用或账号变更时必填）"
                 )
                 return False
 
@@ -451,6 +496,8 @@ class SettingsDialog(QDialog):
             or "https://dav.jianguoyun.com/dav/",
             account=account,
             app_password=app_pw,
+            remote_dir=self.remote_dir_edit.text(),
+            conflict_mode=self.conflict_combo.currentData(),
         ):
             return False  # 凭据保存失败，状态栏已提示
         if enabled and svc.vault_id():

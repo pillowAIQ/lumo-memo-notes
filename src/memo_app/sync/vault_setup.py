@@ -20,7 +20,7 @@ from .transport import (
 )
 
 
-def _layout(client: WebDAVClient, vault_id: str, writer_id: str) -> None:
+def _layout(client: WebDAVClient, writer_id: str) -> None:
     client.mkcol_root()
     client.mkcol("")                                   # vault 根
     client.mkcol(protocol.HEADS_DIR)
@@ -34,11 +34,16 @@ def create_vault(
     writer_id: str,
     password: str,
 ) -> bytes:
-    """创建新 vault：返回 master_key。vault.json 已存在则失败。"""
+    """创建新 vault：返回 master_key。vault.json 已存在则失败。
+
+    vault_id 内嵌进 vault.json——加入端读配置即获得身份，
+    不再需要用户手输库 ID（Obsidian 式：选同一远程目录即可加入）。
+    """
     master_key = crypto.generate_master_key()
     config = crypto.seal_vault(master_key, password)
+    config["vault_id"] = vault_id
     blob = json.dumps(config, ensure_ascii=False).encode("utf-8")
-    _layout(client, vault_id, writer_id)
+    _layout(client, writer_id)
     # 预检 + 写后回读双保险：部分服务端不支持 If-None-Match，
     # 不能依赖 412；回读验证保证 vault.json 与本次写入一致
     if client.exists(protocol.VAULT_FILE):

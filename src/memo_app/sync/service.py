@@ -1,7 +1,7 @@
 """同步服务（计划 §4.5 调度 + §6 凭据）。
 
 - 所有网络操作在专用 QThread 工作线程执行，GUI 事件不碰网络；
-- job 类型：test_conn / setup_create / setup_join / sync；
+- job 类型：test_conn / setup / sync；
 - 调度：启动后延迟首同步、编辑防抖、周期轮询、手动触发；
 - 凭据走 credentials.py（Windows Credential Manager），
   vault_id 存 sync_profile，base_url/enabled 存 QSettings。
@@ -17,7 +17,10 @@ from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal
 
 from .. import db
 from . import credentials, engine, protocol, store, vault_setup
-from .transport import NotFoundError, WebDAVClient
+from .transport import NotFoundError, WebDAVClient, WebDAVError
+
+DEFAULT_REMOTE_DIR = "memo-app"
+CONFLICT_MODES = ("lww", "keep")
 
 logger = logging.getLogger("memo_app.sync.service")
 
@@ -35,15 +38,14 @@ def run_job(job: dict) -> dict:
     app_pw = job["app_password"]
 
     if kind == "test_conn":
-        # 凭据探测：用随机 vault_id 请求必然不存在的路径——
-        # 404 说明认证通过（AuthError 401 才会判失败）
+        # 探测 WebDAV 根目录：拿到任何 HTTP 响应（207/404/409）
+        # 都说明认证通过；只有 401/403 或网络错误才算失败
         probe = WebDAVClient(
-            base_url, account, app_pw,
-            vault_id=str(uuid.uuid4()), timeout=15,
+            base_url, account, app_pw, root_dir="", timeout=15,
             allow_http=bool(job.get("allow_http")),
         )
         try:
-            probe.propfind("heads")
+            probe.propfind("", depth=0)
         except NotFoundError:
             pass  # 认证通过
         return {"ok": True, "kind": kind}
@@ -53,16 +55,23 @@ def run_job(job: dict) -> dict:
         writer_id = store.profile_writer_id(conn)
         vault_id = store.profile_vault_id(conn)
 
-    if kind in ("setup_create", "setup_join"):
-        vid = job["vault_id"]
+    if kind == "setup":
+        # Obsidian 式初始化：远端有 vault.json → 加入（vault_id 从
+        # 配置读出，不手输）；没有 → 新建。远程目录取自设置。
         client = WebDAVClient(
-            base_url, account, app_pw, vault_id=vid, timeout=30,
-            allow_http=bool(job.get("allow_http")),
+            base_url, account, app_pw, root_dir=job["remote_dir"],
+            timeout=30, allow_http=bool(job.get("allow_http")),
         )
-        if kind == "setup_create":
-            mk = vault_setup.create_vault(client, vid, writer_id, vault_pw)
+        if client.exists(protocol.VAULT_FILE):
+            mk, config = vault_setup.open_remote_vault(client, vault_pw)
+            vid = config.get("vault_id")
+            if not protocol.is_uuid(vid):
+                raise WebDAVError(
+                    "远端不是有效的同步库（vault.json 缺少 vault_id）"
+                )
         else:
-            mk, _ = vault_setup.open_remote_vault(client, vault_pw)
+            vid = str(uuid.uuid4())
+            mk = vault_setup.create_vault(client, vid, writer_id, vault_pw)
         # 库密码先于 vault_id 落库：keyring 写失败时本机保持未绑定，
         # 用户可重试；反过来会造成"已绑定但无密码"的不可自助恢复状态
         credentials.save_vault_password(vault_pw)
@@ -75,12 +84,20 @@ def run_job(job: dict) -> dict:
         return {"ok": False, "kind": kind,
                 "error": "未配置同步库（vault）"}
     client = WebDAVClient(
-        base_url, account, app_pw, vault_id=vault_id, timeout=30,
-        allow_http=bool(job.get("allow_http")),
+        base_url, account, app_pw, root_dir=job["remote_dir"],
+        timeout=30, allow_http=bool(job.get("allow_http")),
     )
-    mk, _ = vault_setup.open_remote_vault(client, vault_pw)
+    mk, config = vault_setup.open_remote_vault(client, vault_pw)
+    # 交叉校验：远端 vault.json 内嵌的 vault_id 必须与本机绑定一致，
+    # 否则本地批次的 AAD 上下文对不上，会产生对端无法解密的数据。
+    # 旧版库 vault.json 无 vault_id 字段，跳过校验。
+    remote_vid = str(config.get("vault_id") or "").lower()
+    local_vid = str(vault_id).lower()
+    if remote_vid and protocol.is_uuid(remote_vid) \
+            and remote_vid != local_vid:
+        raise WebDAVError("远程目录不是当前绑定的同步库")
     eng = engine.Engine(
-        client, mk, vault_id,
+        client, mk, local_vid,
         conflict_mode=job.get("conflict_mode", "lww"),
     )
     stats = eng.sync_once()
@@ -157,6 +174,27 @@ class SyncService(QObject):
             self._settings.value("sync_base_url", DEFAULT_BASE_URL)
         )
 
+    @property
+    def remote_dir(self) -> str:
+        """vault 根目录（base_url 相对路径，"" = WebDAV 根）。
+
+        未显式设置过 sync_remote_dir 且本机已绑定库时，回退旧版
+        memo-sync/<vault_id> 布局——保证升级前建库的用户不断同步。
+        """
+        rd = self._settings.value("sync_remote_dir")
+        if rd is not None:
+            return str(rd)
+        vid = self.vault_id()
+        if vid:
+            return f"{protocol.REMOTE_ROOT}/{vid}"
+        return DEFAULT_REMOTE_DIR
+
+    @property
+    def conflict_mode(self) -> str:
+        """冲突解决策略：lww 后写覆盖 / keep 保留冲突副本。"""
+        m = str(self._settings.value("sync_conflict_mode", "lww"))
+        return m if m in CONFLICT_MODES else "lww"
+
     def vault_id(self) -> str | None:
         try:
             with db.db() as conn:
@@ -181,6 +219,8 @@ class SyncService(QObject):
         base_url: str,
         account: str,
         app_password: str,
+        remote_dir: str | None = None,
+        conflict_mode: str = "",
     ) -> bool:
         """保存非敏感配置 + 账号/应用密码（不触发网络）。
 
@@ -189,6 +229,16 @@ class SyncService(QObject):
         （应用密码是账号级凭据，换账号必须重填）。
         返回 False 表示凭据保存失败（调用方应中止后续动作）。
         """
+        base_url = base_url.strip() or DEFAULT_BASE_URL
+        if remote_dir is not None:
+            rd = remote_dir.strip().strip("/")
+            # 本地校验（不触网）：构造客户端时非法路径直接抛错；
+            # 必须先于凭据写入，避免"配置被拒但凭据已落库"
+            try:
+                WebDAVClient(base_url, "u", "p", root_dir=rd)
+            except WebDAVError as e:
+                self._set_status(f"远程目录无效：{e}")
+                return False
         try:
             if app_password and account.strip():
                 credentials.save_credentials(account, app_password)
@@ -200,7 +250,11 @@ class SyncService(QObject):
         except credentials.CredentialError as e:
             self._set_status(f"安全存储不可用：{e}")
             return False
-        self._settings.setValue("sync_base_url", base_url.strip())
+        if remote_dir is not None:
+            self._settings.setValue("sync_remote_dir", rd)
+        if conflict_mode in CONFLICT_MODES:
+            self._settings.setValue("sync_conflict_mode", conflict_mode)
+        self._settings.setValue("sync_base_url", base_url)
         self._settings.setValue("sync_enabled", enabled)
         if enabled:
             self._periodic.start()
@@ -247,15 +301,20 @@ class SyncService(QObject):
             "app_password": app_password,
         })
 
-    def queue_setup(
-        self, mode: str, vault_id: str, vault_password: str
-    ) -> bool:
-        """排队执行 vault 创建/加入（网络在工作线程）。
+    def queue_setup(self, vault_password: str) -> bool:
+        """排队执行同步库初始化（自动判断新建/加入，Obsidian 式）。
 
+        远端目录有 vault.json → 用库密码加入；没有 → 新建库。
         返回 True 表示已入队；False 表示凭据缺失/已有任务未入队。
         """
         if self._setup_busy:
             self._set_status("同步库设置正在进行中，请稍候")
+            return False
+        # 已绑定库时禁止重复初始化：换目录会覆盖 vault 绑定，
+        # 旧批次按旧 vault_id 加密后对端永远解不开（纵深防御，
+        # UI 层 _on_setup 已有同样拦截）
+        if self.vault_id():
+            self._set_status("本机已绑定同步库，重复初始化已拒绝")
             return False
         try:
             account, app_pw = credentials.load_credentials()
@@ -265,30 +324,50 @@ class SyncService(QObject):
         if not account or not app_pw:
             self._set_status("错误：缺少坚果云账号/应用密码")
             return False
+        # 固化本次 setup 使用的远程目录：未绑定时 remote_dir 可能是
+        # 默认值而非显式设置，绑定后属性会回退旧布局——不同步固化
+        # 会导致 setup 建在 A 目录、sync 却去 B 目录找 vault.json
+        self._settings.setValue("sync_remote_dir", self.remote_dir)
         self._setup_busy = True
         self._enqueue({
-            "kind": f"setup_{mode}",
+            "kind": "setup",
             "base_url": self.base_url,
+            "remote_dir": self.remote_dir,
             "account": account,
             "app_password": app_pw,
             "vault_password": vault_password,
-            "vault_id": vault_id.lower(),
         })
         return True
 
+    def logout(self) -> None:
+        """退出登录：清除账号凭据并停用同步（远程目录/库密码保留）。"""
+        try:
+            credentials.clear_credentials()
+        except credentials.CredentialError:
+            pass
+        self._settings.setValue("sync_enabled", False)
+        self._periodic.stop()
+        self._debounce.stop()
+        self._set_status("已退出登录")
+
     # ---------- 同步触发 ----------
 
-    def request_sync(self, conflict_mode: str = "lww") -> None:
+    def request_sync(self, conflict_mode: str = "") -> None:
         """请求一轮同步；运行中则合并为结束后补一次。
 
-        conflict_mode: "lww" 后写覆盖 / "keep" 保留冲突副本。
+        conflict_mode: "lww" 后写覆盖 / "keep" 保留冲突副本；
+        空串时使用设置里的冲突解决策略。
         """
         if not self.enabled:
             return
+        mode = (
+            conflict_mode if conflict_mode in CONFLICT_MODES
+            else self.conflict_mode
+        )
         try:
             with db.db() as conn:
                 if store.profile_vault_id(conn) is None:
-                    self._set_status("未配置同步库，请在设置中完成建库/加入")
+                    self._set_status("未配置同步库，请在设置中完成初始化")
                     return
             account, app_pw = credentials.load_credentials()
             vault_pw = credentials.load_vault_password()
@@ -304,16 +383,17 @@ class SyncService(QObject):
             # 记录本次请求的冲突策略，任务结束后补跑时保留；
             # keep 优先——用户显式选择的保留语义不被自动 lww 覆盖
             self._pending = True
-            if conflict_mode == "keep" or self._pending_mode != "keep":
-                self._pending_mode = conflict_mode
+            if mode == "keep" or self._pending_mode != "keep":
+                self._pending_mode = mode
             return
         self._enqueue({
             "kind": "sync",
             "base_url": self.base_url,
+            "remote_dir": self.remote_dir,
             "account": account,
             "app_password": app_pw,
             "vault_password": vault_pw,
-            "conflict_mode": conflict_mode,
+            "conflict_mode": mode,
         })
 
     def notify_change(self) -> None:
@@ -336,7 +416,7 @@ class SyncService(QObject):
         if has_work:
             self._debounce.start()
 
-    def sync_now(self, conflict_mode: str = "lww") -> None:
+    def sync_now(self, conflict_mode: str = "") -> None:
         """手动立即同步（忽略防抖，仍走工作线程）。"""
         self._debounce.stop()
         self.request_sync(conflict_mode)
@@ -354,7 +434,7 @@ class SyncService(QObject):
     def _on_result(self, res: dict) -> None:
         self._inflight = max(0, self._inflight - 1)
         kind = res.get("kind")
-        if kind and kind.startswith("setup_"):
+        if kind == "setup":
             self._setup_busy = False
         if kind == "test_conn":
             if res.get("ok"):

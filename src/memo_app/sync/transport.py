@@ -5,7 +5,7 @@
 安全约束：
 - 始终校验证书（urllib 默认行为，不设 verify=False）；
 - 认证信息不随跨主机重定向泄露（自定义 redirect handler 剥离 Authorization）；
-- 响应体有上限；路径限于 memo-sync/<vault_id>/ 根；
+- 响应体有上限；路径限于 vault 根（用户自选 root_dir 或旧版 memo-sync/<vault_id>/）；
 - 不假定 MOVE/条件写/原子重命名/分页能力——阶段 0 实测后再依赖。
 """
 from __future__ import annotations
@@ -109,9 +109,12 @@ class RemoteEntry:
 class WebDAVClient:
     """单 vault 的 WebDAV 客户端。
 
-    base_url 形如 https://dav.jianguoyun.com/dav/；
-    vault_id 绑定后，所有 rel_path 都是 vault 根内相对路径，
-    实际 URL 前缀为 <base>/memo-sync/<vault_id>/。
+    base_url 形如 https://dav.jianguoyun.com/dav/。
+    vault 根目录两种来源（互斥）：
+    - root_dir：用户自选远程目录（如 "我的坚果云/memo"），
+      "" 表示 WebDAV 根；
+    - vault_id（旧布局兼容）：固定 memo-sync/<vault_id>/。
+    所有 rel_path 都是 vault 根内相对路径。
     """
 
     def __init__(
@@ -121,6 +124,7 @@ class WebDAVClient:
         password: str,
         *,
         vault_id: str | None = None,
+        root_dir: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         max_file: int = protocol.MAX_REMOTE_FILE,
         allow_http: bool = False,
@@ -144,13 +148,24 @@ class WebDAVClient:
             if not (allow_http and scheme == "http"
                     and parts.hostname in ("127.0.0.1", "localhost", "::1")):
                 raise WebDAVError("坚果云 WebDAV 必须使用 HTTPS")
+        if vault_id is not None and root_dir is not None:
+            raise WebDAVError("vault_id and root_dir are mutually exclusive")
         # 私有化：构造后不可被赋值绕过校验（Basic Auth 防泄露）
         self._base_url = base_url.rstrip("/") + "/"
-        if vault_id is not None:
+        self._legacy_vault = vault_id is not None and root_dir is None
+        if root_dir is not None:
+            self._root = self._validate_root_dir(root_dir)
+            self.vault_id = None
+        elif vault_id is not None:
             vault_id = vault_id.lower()
             if not protocol.is_uuid(vault_id):
                 raise WebDAVError("invalid vault_id")
-        self.vault_id = vault_id
+            self.vault_id = vault_id
+            self._root = f"{protocol.REMOTE_ROOT}/{vault_id}"
+        else:
+            self.vault_id = None
+            self._root = ""
+        self._root_segs = [s for s in self._root.split("/") if s]
         self._auth = "Basic " + base64.b64encode(
             f"{username}:{password}".encode("utf-8")
         ).decode("ascii")
@@ -158,48 +173,104 @@ class WebDAVClient:
         self.max_file = max_file
         self._opener = urllib.request.build_opener(_SafeRedirect)
 
+    @staticmethod
+    def _validate_root_dir(root_dir: str) -> str:
+        """规范化用户自选远程目录：去首尾 /，逐段校验，返回 "" 或 a/b/c。
+
+        不裁剪空白——" foo" 与 "foo" 是不同目录，静默别名会选错
+        vault 位置；段首尾空白直接拒绝。
+        """
+        rel = root_dir.strip("/")
+        if not rel:
+            return ""
+        segs = rel.split("/")
+        for s in segs:
+            if (
+                not s
+                or s != s.strip()
+                or s in (".", "..")
+                or "\\" in s
+                or "\x00" in s
+                or any(ord(c) < 0x20 for c in s)
+            ):
+                raise WebDAVError("invalid root_dir")
+        return "/".join(segs)
+
     @property
     def base_url(self) -> str:
         return self._base_url
 
+    @property
+    def root_dir(self) -> str:
+        """vault 根目录（base_url 相对路径，"" = WebDAV 根）。"""
+        return self._root
+
     def set_vault(self, vault_id: str) -> None:
+        if not self._legacy_vault:
+            raise WebDAVError("client root is fixed at construction")
         vault_id = vault_id.lower()
         if not protocol.is_uuid(vault_id):
             raise WebDAVError("invalid vault_id")
         self.vault_id = vault_id
+        self._root = f"{protocol.REMOTE_ROOT}/{vault_id}"
+        self._root_segs = [protocol.REMOTE_ROOT, vault_id]
 
     # ---------- 内部 ----------
 
-    def _vault_prefix(self) -> str:
-        """vault 在服务端的路径前缀（如 /dav/memo-sync/<vid>）。
+    def _mount_path(self) -> str:
+        return urllib.parse.urlsplit(self._base_url).path.rstrip("/")
 
-        每次使用都校验 vault_id，防止属性被直接赋值绕过 set_vault。
-        """
-        if not protocol.is_uuid(self.vault_id):
-            raise WebDAVError("invalid vault_id")
-        mount = urllib.parse.urlsplit(self._base_url).path.rstrip("/")
-        return f"{mount}/{protocol.REMOTE_ROOT}/{self.vault_id}"
+    def _vault_prefix(self) -> str:
+        """vault 在服务端的路径前缀（如 /dav/memo-sync/<vid> 或 /dav/a/b）。"""
+        root = "/".join(self._root_segs)
+        if not root:
+            return self._mount_path()
+        return f"{self._mount_path()}/{root}"
 
     def _check_rel(self, rel_path: str) -> None:
         rel = rel_path.strip("/")
-        if ".." in rel.split("/") or "\\" in rel or "\x00" in rel:
-            raise WebDAVError("invalid remote path")
+        if not rel:
+            return
+        for s in rel.split("/"):
+            if (
+                not s or s in (".", "..")
+                or "\\" in s or "\x00" in s
+                or any(ord(c) < 0x20 for c in s)
+            ):
+                raise WebDAVError("invalid remote path")
 
     def _url(self, rel_path: str) -> str:
         self._check_rel(rel_path)
-        # base_url 已含挂载点（如 .../dav/），vault 前缀相对它是 memo-sync/<vid>/
-        if not protocol.is_uuid(self.vault_id):
-            raise WebDAVError("invalid vault_id")
-        return (
-            self._base_url
-            + f"{protocol.REMOTE_ROOT}/{self.vault_id}/"
-            + urllib.parse.quote(rel_path.strip("/"), safe="/")
-        )
+        # base_url 已含挂载点（如 .../dav/），vault 前缀相对它是 root_segs
+        parts = [
+            urllib.parse.quote(s, safe="") for s in self._root_segs
+        ]
+        rel = urllib.parse.quote(rel_path.strip("/"), safe="/")
+        if rel:
+            parts.append(rel)
+            return self._base_url + "/".join(parts)
+        # 空 rel = vault 根集合本身：需要尾斜杠
+        suffix = "/".join(parts)
+        return self._base_url + (suffix + "/" if suffix else "")
 
     def _request(
         self,
         method: str,
         rel_path: str,
+        *,
+        data: bytes | None = None,
+        headers: dict | None = None,
+        depth: int | None = None,
+    ) -> tuple[int, bytes, dict]:
+        return self._request_url(
+            method, self._url(rel_path),
+            data=data, headers=headers, depth=depth,
+        )
+
+    def _request_url(
+        self,
+        method: str,
+        url: str,
         *,
         data: bytes | None = None,
         headers: dict | None = None,
@@ -211,7 +282,7 @@ class WebDAVClient:
         if depth is not None:
             hdrs["Depth"] = str(depth)
         req = urllib.request.Request(
-            self._url(rel_path), data=data, headers=hdrs, method=method
+            url, data=data, headers=hdrs, method=method
         )
         try:
             resp = self._opener.open(req, timeout=self.timeout)
@@ -248,28 +319,41 @@ class WebDAVClient:
     # ---------- WebDAV 操作 ----------
 
     def mkcol_root(self) -> None:
-        """创建 memo-sync 根集合（vault 的父目录）；已存在（405）视为成功。"""
-        url = self._base_url + protocol.REMOTE_ROOT
-        req = urllib.request.Request(
-            url, method="MKCOL", headers={"Authorization": self._auth}
-        )
-        try:
-            resp = self._opener.open(req, timeout=self.timeout)
-            resp.read(4096)
-        except urllib.error.HTTPError as e:
+        """确保 vault 根目录（含各级父目录）存在；逐段 MKCOL 幂等。
+
+        已存在（405）或坚果云的 409+存在性验证均视为成功。
+        """
+        for i in range(1, len(self._root_segs) + 1):
+            url = (
+                self._base_url
+                + "/".join(
+                    urllib.parse.quote(s, safe="")
+                    for s in self._root_segs[:i]
+                )
+                + "/"
+            )
+            req = urllib.request.Request(
+                url, method="MKCOL",
+                headers={"Authorization": self._auth},
+            )
             try:
-                e.read(4096)
-            except Exception:
-                pass
-            if e.code == 405:
-                return
-            if e.code == 409 and self._collection_exists(url):
-                # 坚果云：对已存在集合 MKCOL 返回 409——验证存在则幂等成功
-                return
-            _raise_for_status(e.code)
-            raise WebDAVError(f"HTTP {e.code}", e.code) from e
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise WebDAVError(f"network error: {type(e).__name__}") from e
+                resp = self._opener.open(req, timeout=self.timeout)
+                resp.read(4096)
+            except urllib.error.HTTPError as e:
+                try:
+                    e.read(4096)
+                except Exception:
+                    pass
+                if e.code == 405:
+                    continue
+                if e.code == 409 and self._collection_exists(url):
+                    continue
+                _raise_for_status(e.code)
+                raise WebDAVError(f"HTTP {e.code}", e.code) from e
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                raise WebDAVError(
+                    f"network error: {type(e).__name__}"
+                ) from e
 
     def _collection_exists(self, url: str) -> bool:
         """对绝对 URL 做 Depth:0 PROPFIND，判断集合是否存在。"""
@@ -318,6 +402,33 @@ class WebDAVClient:
         )
         return self.parse_multistatus(body)
 
+    def list_dir(self, dir_path: str) -> list[RemoteEntry]:
+        """PROPFIND Depth:1 列出 base_url 根下的目录（远程目录选择器用）。
+
+        dir_path 相对 base_url 根（"" = 根目录）；返回条目 rel
+        相对 dir_path（直接子项名称，目录无尾斜杠）。
+        """
+        # 与 _validate_root_dir 同强度：拒绝空段/./../控制字符，
+        # 避免 URL 规范化与 anchor 不一致导致静默空列表
+        rel = self._validate_root_dir(dir_path)
+        segs = rel.split("/") if rel else []
+        url = self._base_url + "/".join(
+            urllib.parse.quote(s, safe="") for s in segs
+        )
+        if segs:
+            url += "/"
+        _, body, _ = self._request_url(
+            "PROPFIND",
+            url,
+            data=PROPFIND_PROPS.encode("utf-8"),
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+            depth=1,
+        )
+        anchor = self._mount_path()
+        if rel:
+            anchor += "/" + rel
+        return self.parse_multistatus(body, anchor=anchor)
+
     def exists(self, rel_path: str) -> bool:
         # Depth:0 成功应返回恰好自身一条 entry；
         # 服务器整体 404 或 207+404-propstat 两种形式都判不存在
@@ -349,8 +460,14 @@ class WebDAVClient:
 
     # ---------- XML 解析 ----------
 
-    def parse_multistatus(self, body: bytes) -> list[RemoteEntry]:
-        """解析 PROPFIND 207 响应，返回 vault 根内相对路径的条目。"""
+    def parse_multistatus(
+        self, body: bytes, *, anchor: str | None = None
+    ) -> list[RemoteEntry]:
+        """解析 PROPFIND 207 响应，返回相对 anchor 的路径条目。
+
+        anchor 缺省为 vault 前缀；list_dir 传入被列目录的绝对路径。
+        """
+        anchor = self._vault_prefix() if anchor is None else anchor
         # 拒绝 DTD/实体声明：远端 XML 不可信，ElementTree 不解析外部实体
         # 但内部实体仍有放大风险，直接拒绝（body 已有 16MB 上限）
         upper = body.upper()
@@ -370,7 +487,7 @@ class WebDAVClient:
             if href_el is None or not href_el.text:
                 # RFC 要求 response 必须有 href；缺失说明响应畸形，不能静默丢
                 raise WebDAVError("PROPFIND response missing href")
-            rel = self._href_to_vault_rel(href_el.text.strip())
+            rel = self._href_to_rel(href_el.text.strip(), anchor)
             if rel is None:
                 continue
             # 仅保留含 2xx propstat 的 response：
@@ -418,11 +535,11 @@ class WebDAVClient:
             raise WebDAVError("PROPFIND returned no responses")
         return entries
 
-    def _href_to_vault_rel(self, href: str) -> str | None:
-        """href -> vault 根内相对路径；越界/穿越返回 None。
+    def _href_to_rel(self, href: str, anchor: str) -> str | None:
+        """href -> 相对 anchor 的路径；越界/穿越返回 None。
 
-        href 必须位于本客户端 vault 的服务端前缀之下——
-        锚定匹配，防止 "/x/dav/memo-sync/<vid>/..." 这类伪前缀绕过。
+        href 必须位于 anchor 锚定的服务端前缀之下——
+        防止 "/x/dav/..." 这类伪前缀绕过。
         """
         try:
             parts = urllib.parse.urlsplit(href)
@@ -434,7 +551,7 @@ class WebDAVClient:
             if (parts.scheme, parts.netloc) != (base.scheme, base.netloc):
                 return None
         path = urllib.parse.unquote(parts.path)
-        prefix = self._vault_prefix()
+        prefix = anchor
         if path == prefix:
             return ""
         if not path.startswith(prefix + "/"):

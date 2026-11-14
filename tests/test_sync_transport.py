@@ -279,9 +279,66 @@ class TransportTest(unittest.TestCase):
 
     def test_vault_id_direct_assignment_blocked(self) -> None:
         c = self._client(self.VID)
-        c.vault_id = "../escape"  # 绕过 set_vault 的直接赋值
+        c.put("heads/a.enc", b"1")
+        # 构造后篡改属性不能改变已固定的根路径（路径在 __init__ 固化）
+        c.vault_id = "../escape"
+        with self.assertRaises(AttributeError):
+            c.root_dir = "../escape"  # 只读 property，不可篡改
+        self.assertEqual(c.get("heads/a.enc"), b"1")
         with self.assertRaises(transport.WebDAVError):
-            c.get("heads/a.enc")
+            c.set_vault("../escape")
+        with self.assertRaises(transport.WebDAVError):
+            c.set_vault("not-a-uuid")
+
+    def _root_client(self) -> transport.WebDAVClient:
+        """root_dir="" 客户端：rel 路径相对 base_url 根（目录浏览用）。"""
+        return transport.WebDAVClient(
+            f"http://127.0.0.1:{self.port}/dav/",
+            "u", "p", root_dir="", allow_http=True, timeout=5,
+        )
+
+    def test_root_dir_client_layout(self) -> None:
+        c = transport.WebDAVClient(
+            f"http://127.0.0.1:{self.port}/dav/", "u", "p",
+            root_dir="my vault/memo", allow_http=True, timeout=5,
+        )
+        self.assertEqual(c.root_dir, "my vault/memo")
+        c.mkcol_root()
+        c.put("heads/a.enc", b"1")
+        self.assertIn(
+            "/dav/my%20vault/memo/heads/a.enc", FakeWebDAV.store
+        )
+        # vault_id 与 root_dir 互斥
+        with self.assertRaises(transport.WebDAVError):
+            transport.WebDAVClient(
+                f"http://127.0.0.1:{self.port}/dav/", "u", "p",
+                vault_id=self.VID, root_dir="x", allow_http=True,
+            )
+        for bad in ("a//b", "a/./b", "../x", "a\\b", "a\x01b"):
+            with self.assertRaises(transport.WebDAVError, msg=bad):
+                transport.WebDAVClient(
+                    f"http://127.0.0.1:{self.port}/dav/", "u", "p",
+                    root_dir=bad, allow_http=True,
+                )
+
+    def test_list_dir_root_and_nested(self) -> None:
+        c = self._root_client()
+        c.put("memo-app/heads/a.enc", b"1")
+        c.put("other/f.txt", b"2")
+        root_entries = {e.rel: e for e in c.list_dir("") if e.rel}
+        self.assertTrue(root_entries["memo-app"].is_collection)
+        self.assertTrue(root_entries["other"].is_collection)
+        sub = {e.rel: e for e in c.list_dir("memo-app") if e.rel}
+        self.assertIn("heads", sub)
+        self.assertTrue(sub["heads"].is_collection)
+        # Depth:1 只到直接子项，不含更深的文件
+        self.assertNotIn("heads/a.enc", sub)
+
+    def test_list_dir_rejects_bad_paths(self) -> None:
+        c = self._root_client()
+        for bad in ("a//b", "a/./b", "../x", "a\\b", "a\x01b"):
+            with self.assertRaises(transport.WebDAVError, msg=bad):
+                c.list_dir(bad)
 
     def test_href_pseudo_prefix_rejected(self) -> None:
         c = self._client(self.VID)

@@ -55,6 +55,8 @@ class _SyncStub:
 
     enabled = False
     base_url = "https://dav.jianguoyun.com/dav/"
+    remote_dir = "memo-app"
+    conflict_mode = "lww"
     status_text = "未启用"
 
     class _Sig:
@@ -78,6 +80,9 @@ class _SyncStub:
         pass
 
     def test_connection(self, *a, **k):
+        pass
+
+    def logout(self):
         pass
 
     def notify_change(self):

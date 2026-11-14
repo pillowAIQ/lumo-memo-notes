@@ -544,7 +544,7 @@ class Engine:
         return f"{protocol.COMMITS_DIR}/{wid}/{seq}.enc"
 
     def _ensure_layout(self) -> None:
-        """幂等创建 memo-sync/<vid>/{heads,commits,commits/<wid>}。"""
+        """幂等创建 vault 根下 heads/commits/commits/<wid>。"""
         self.client.mkcol_root()
         self.client.mkcol("")          # vault 根集合
         self.client.mkcol(protocol.HEADS_DIR)
