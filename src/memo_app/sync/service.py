@@ -1,7 +1,7 @@
 """同步服务（计划 §4.5 调度 + §6 凭据）。
 
 - 所有网络操作在专用 QThread 工作线程执行，GUI 事件不碰网络；
-- job 类型：setup_create / setup_join / sync；
+- job 类型：test_conn / setup_create / setup_join / sync；
 - 调度：启动后延迟首同步、编辑防抖、周期轮询、手动触发；
 - 凭据走 credentials.py（Windows Credential Manager），
   vault_id 存 sync_profile，base_url/enabled 存 QSettings。
@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 
 from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Signal
 
 from .. import db
 from . import credentials, engine, protocol, store, vault_setup
-from .transport import WebDAVClient
+from .transport import NotFoundError, WebDAVClient
 
 logger = logging.getLogger("memo_app.sync.service")
 
@@ -31,8 +32,22 @@ def run_job(job: dict) -> dict:
     base_url = job["base_url"]
     account = job["account"]
     app_pw = job["app_password"]
-    vault_pw = job["vault_password"]
 
+    if kind == "test_conn":
+        # 凭据探测：用随机 vault_id 请求必然不存在的路径——
+        # 404 说明认证通过（AuthError 401 才会判失败）
+        probe = WebDAVClient(
+            base_url, account, app_pw,
+            vault_id=str(uuid.uuid4()), timeout=15,
+            allow_http=bool(job.get("allow_http")),
+        )
+        try:
+            probe.propfind("heads")
+        except NotFoundError:
+            pass  # 认证通过
+        return {"ok": True, "kind": kind}
+
+    vault_pw = job["vault_password"]
     with db.db() as conn:
         writer_id = store.profile_writer_id(conn)
         vault_id = store.profile_vault_id(conn)
@@ -47,11 +62,11 @@ def run_job(job: dict) -> dict:
             mk = vault_setup.create_vault(client, vid, writer_id, vault_pw)
         else:
             mk, _ = vault_setup.open_remote_vault(client, vault_pw)
+        # 库密码先于 vault_id 落库：keyring 写失败时本机保持未绑定，
+        # 用户可重试；反过来会造成"已绑定但无密码"的不可自助恢复状态
+        credentials.save_vault_password(vault_pw)
         with db.db() as conn:
             store.set_profile_vault_id(conn, vid)
-        # 库密码只在建库/加入成功后落 keyring——
-        # 先验证后持久化，避免错密码污染后续所有同步
-        credentials.save_vault_password(vault_pw)
         return {"ok": True, "kind": kind, "vault_id": vid}
 
     # sync：vault_id 必须已配置
@@ -93,12 +108,15 @@ class _Worker(QObject):
 class SyncService(QObject):
     status_changed = Signal(str)
     synced = Signal()   # 远端数据已应用到本地库，UI 需刷新
+    conn_tested = Signal(bool, str)  # (成功?, 结果说明) 连接测试
+    vault_ready = Signal(str)        # 同步库就绪，参数=vault_id
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = QSettings()
         self._status = "未启用"
-        self._running = False
+        self._inflight = 0  # 已入队/执行中的 job 数（>0 即忙）
+        self._setup_busy = False  # setup job 进行中（防重复建库）
         self._pending = False
         self._pending_mode = "lww"
         self._thread = QThread(self)
@@ -157,7 +175,7 @@ class SyncService(QObject):
         base_url: str,
         account: str,
         app_password: str,
-    ) -> None:
+    ) -> bool:
         """保存非敏感配置 + 账号/应用密码（不触发网络）。
 
         app_password 留空 = 不修改已存密码（UI 承诺语义）；
@@ -166,7 +184,7 @@ class SyncService(QObject):
         返回 False 表示凭据保存失败（调用方应中止后续动作）。
         """
         try:
-            if app_password:
+            if app_password and account.strip():
                 credentials.save_credentials(account, app_password)
             elif account:
                 old_acc, old_pw = credentials.load_credentials()
@@ -186,18 +204,62 @@ class SyncService(QObject):
         self._set_status("已启用，等待同步" if enabled else "已停用")
         return True
 
+    def test_connection(
+        self, account: str, app_password: str, base_url: str = ""
+    ) -> None:
+        """验证坚果云账号+应用密码（真实网络请求，工作线程）。
+
+        app_password 留空时回退到已存凭据——但仅当账号与已存
+        账号一致；账号变更必须重新填写应用密码。
+        """
+        if self._inflight:
+            self.conn_tested.emit(False, "正在同步中，请稍后再试")
+            return
+        account = account.strip()
+        if not app_password:
+            try:
+                acc, pw = credentials.load_credentials()
+            except credentials.CredentialError:
+                acc = pw = None
+            if not account:
+                account = acc or ""
+            if pw and account and acc and \
+                    acc.casefold() == account.casefold():
+                app_password = pw
+            elif pw and account:
+                self.conn_tested.emit(
+                    False, "账号已变更，请重新填写应用密码"
+                )
+                return
+        if not account or not app_password:
+            self.conn_tested.emit(False, "请先填写账号和应用密码")
+            return
+        self._enqueue({
+            "kind": "test_conn",
+            "base_url": base_url.strip() or self.base_url,
+            "account": account,
+            "app_password": app_password,
+        })
+
     def queue_setup(
         self, mode: str, vault_id: str, vault_password: str
-    ) -> None:
-        """排队执行 vault 创建/加入（网络在工作线程）。"""
+    ) -> bool:
+        """排队执行 vault 创建/加入（网络在工作线程）。
+
+        返回 True 表示已入队；False 表示凭据缺失/已有任务未入队。
+        """
+        if self._setup_busy:
+            self._set_status("同步库设置正在进行中，请稍候")
+            return False
         try:
             account, app_pw = credentials.load_credentials()
         except credentials.CredentialError as e:
             self._set_status(f"安全存储不可用：{e}")
-            return
+            return False
         if not account or not app_pw:
             self._set_status("错误：缺少坚果云账号/应用密码")
-            return
+            return False
+        self._setup_busy = True
         self._enqueue({
             "kind": f"setup_{mode}",
             "base_url": self.base_url,
@@ -206,6 +268,7 @@ class SyncService(QObject):
             "vault_password": vault_password,
             "vault_id": vault_id.lower(),
         })
+        return True
 
     # ---------- 同步触发 ----------
 
@@ -231,7 +294,7 @@ class SyncService(QObject):
         if not account or not app_pw or not vault_pw:
             self._set_status("错误：凭据不完整，请检查设置")
             return
-        if self._running:
+        if self._inflight:
             # 记录本次请求的冲突策略，任务结束后补跑时保留；
             # keep 优先——用户显式选择的保留语义不被自动 lww 覆盖
             self._pending = True
@@ -279,13 +342,22 @@ class SyncService(QObject):
             self.request_sync()
 
     def _enqueue(self, job: dict) -> None:
-        self._running = True
+        self._inflight += 1
         self._worker.job.emit(job)
 
     def _on_result(self, res: dict) -> None:
-        self._running = False
+        self._inflight = max(0, self._inflight - 1)
         kind = res.get("kind")
-        if res.get("ok"):
+        if kind and kind.startswith("setup_"):
+            self._setup_busy = False
+        if kind == "test_conn":
+            if res.get("ok"):
+                self.conn_tested.emit(True, "连接成功，坚果云账号可用")
+            else:
+                self.conn_tested.emit(
+                    False, f"连接失败：{res.get('error', '未知错误')}"
+                )
+        elif res.get("ok"):
             if kind == "sync":
                 s = res.get("stats", {})
                 ts = datetime.now().strftime("%H:%M")
@@ -305,6 +377,9 @@ class SyncService(QObject):
                     self.synced.emit()
             else:
                 self._set_status("同步库已就绪")
+                vid = res.get("vault_id")
+                if vid:
+                    self.vault_ready.emit(str(vid))
                 # 建库/加入成功后立即同步，不等周期轮询
                 self.request_sync()
         else:

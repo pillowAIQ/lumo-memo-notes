@@ -152,6 +152,18 @@ class VaultSetupTest(unittest.TestCase):
                 "vault_id": VID, "allow_http": True,
             })
 
+    def test_run_job_test_conn(self) -> None:
+        """test_conn 探测 job：假服务器 404 视为认证通过。"""
+        tmp = tempfile.mkdtemp()
+        self._mk(tmp)
+        base = f"http://127.0.0.1:{self.port}/dav/"
+        r = service.run_job({
+            "kind": "test_conn", "base_url": base,
+            "account": "u", "app_password": "p", "allow_http": True,
+        })
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["kind"], "test_conn")
+
 
 if __name__ == "__main__":
     unittest.main()

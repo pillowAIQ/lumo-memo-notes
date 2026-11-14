@@ -62,6 +62,8 @@ class _SyncStub:
             pass
 
     status_changed = _Sig()
+    conn_tested = _Sig()
+    vault_ready = _Sig()
 
     def vault_id(self):
         return None
@@ -73,6 +75,9 @@ class _SyncStub:
         pass
 
     def sync_now(self, *a, **k):
+        pass
+
+    def test_connection(self, *a, **k):
         pass
 
     def notify_change(self):
