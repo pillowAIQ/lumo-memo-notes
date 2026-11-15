@@ -1,130 +1,131 @@
-# 轻笺 · Lumo — 个人随手记与待办
+# 轻笺 · Lumo｜Windows 备忘录、桌面便签与待办事项
 
-> 原名 memo。更名仅影响显示名称与 exe（`Lumo.exe`）；包名 `memo_app`、数据目录、设置与凭据保持不变。
+随手记下灵感，把待办留在桌面。轻笺是一款基于 Python + PySide6 的 Windows 桌面备忘录软件，支持全局快捷记录、分类搜索、截止提醒、桌面待办挂件，以及可选的坚果云 WebDAV 加密同步。
 
-自研极简备忘录软件（Windows）。随手记录想法与待办事项，单机 SQLite 存储。
+**Lumo is a Windows memo and notes app with desktop sticky notes, to-do lists, reminders, global quick capture, and optional encrypted WebDAV sync.**
 
-## 技术栈
+[下载 Windows 版](https://github.com/pillowAIQ/lumo-memo-notes/releases/latest) · [同步使用指南](docs/jianguoyun-sync-user-guide.md) · [开发与打包](docs/packaging.md)
 
-- **Python 3.11 + PySide6**（Qt 桌面 GUI）
-- **pynput**（全局热键监听）
-- **SQLite**（stdlib `sqlite3`，WAL 模式）
-- 数据默认存于 `~/.memo_app/memo.db`，可用环境变量 `MEMO_APP_DATA_DIR` 修改
+![轻笺 Lumo 备忘录主界面：松绿主题、分类侧栏、笔记卡片与待办提醒](docs/images/main-pine.png)
 
-## 运行
+## 能做什么
 
-```bat
-run.bat
-```
+| 场景 | 功能 |
+| --- | --- |
+| 灵感来了，马上记下 | 默认 **Ctrl+O** 全局呼出快捷输入框，Enter 保存；支持 `/分类名` 和 Tab 补全 |
+| 日常笔记与备忘 | 分类、置顶、内容搜索、双击编辑；删除后可从回收站恢复 |
+| 管理待办事项 | 优先级、截止时间、重复提醒，支持“明天9点”等自然语言时间输入 |
+| 桌面随时查看 | 半透明置顶待办挂件，按分类展开、勾选完成、拖动位置或收起为标题条 |
+| 按喜好换皮肤 | 松绿、墨夜、薰衣草三套主题，切换后立即生效 |
+| 多台 Windows 电脑接着写 | 可选坚果云 WebDAV 双向同步，AES-256-GCM 加密，支持冲突副本 |
+| 本地使用 | SQLite 本地存储，无需配置云端即可记录；关闭主窗口后可驻留托盘 |
 
-或手动：
+## 应用截图
 
-```bash
+以下均为实际应用界面，使用隔离临时数据库与演示内容生成，不包含个人笔记或账号凭据。
+
+### 三套主题，同一份记录
+
+| 墨夜 · 深色模式 | 薰衣草 · 浅紫主题 |
+| --- | --- |
+| ![轻笺备忘录墨夜深色主题](docs/images/main-ink.png) | ![轻笺备忘录薰衣草浅紫主题](docs/images/main-lavender.png) |
+
+### 快捷记录与桌面待办
+
+在其他应用中呼出输入框，记完继续手头的事；主窗口最小化或隐藏到托盘后，桌面挂件可自动展示未完成事项。
+
+![全局快捷记录输入框](docs/images/quick-capture.png)
+
+![桌面待办挂件：按分类展开与勾选完成](docs/images/desktop-todo.png)
+
+### 在应用内管理同步
+
+设置页集中管理常规、外观、快捷键、多端同步和关于；同步需要自行配置 WebDAV 账号与同步库密码。
+
+![多端同步设置：账号、远程目录、同步库与状态](docs/images/settings-sync.png)
+
+## 下载与开始使用
+
+1. 前往 [GitHub Releases](https://github.com/pillowAIQ/lumo-memo-notes/releases/latest)，下载 `Lumo-release.zip`。
+2. **完整解压**压缩包，保留 `Lumo` 文件夹中的全部文件。
+3. 运行 `Lumo/Lumo.exe`，输入第一条备忘录，按 Enter 保存。
+
+Windows 分发包自带运行环境，无需另装 Python。不要只复制 `Lumo.exe`，它需要同目录的 `_internal` 依赖。
+
+### 常用操作
+
+| 操作 | 方式 |
+| --- | --- |
+| 全局快捷记录 | 默认 Ctrl+O，可在「设置 → 快捷键」录制或修改 |
+| 搜索笔记 | Ctrl+F；Esc 清空搜索 |
+| 保存记录 | Enter |
+| 编辑记录 | 双击记录，Enter 保存，Esc 取消 |
+| 快捷记录选择分类 | 输入 `/` 后键入分类名，Tab 补全 |
+| 打开设置 | 侧栏左下角「设置」，选择分区 |
+| 完全退出 | 系统托盘菜单 → 退出 |
+
+默认 Ctrl+O 可能与其他软件的“打开文件”快捷键冲突，建议按自己的习惯修改。系统托盘可用时，关闭主窗口会隐藏到托盘；再次运行应用会唤出已有实例。
+
+## 数据与多设备同步
+
+- 默认数据库：`~/.memo_app/memo.db`；可通过环境变量 `MEMO_APP_DATA_DIR` 指定独立数据目录。
+- 备份前先从托盘退出应用，再复制整个数据目录。
+- 同步为可选功能，当前主要面向**多台 Windows 电脑**，不提供手机端应用。
+- 多台电脑需使用相同远程目录和同步库密码；账号与密码通过 Windows 凭据管理器保存。
+- 同步库密码用于解密远端数据，忘记后无法找回。同步会传播编辑和删除，不能代替独立备份。
+
+完整步骤与故障排查见 [坚果云同步用户指南](docs/jianguoyun-sync-user-guide.md)。协议与实现说明见 [同步协议](docs/jianguoyun-sync-protocol.md)。
+
+> 应用曾使用 memo 名称。当前显示名为「轻笺 · Lumo」、可执行文件为 `Lumo.exe`；内部包名 `memo_app`、数据目录、QSettings 与凭据标识沿用原值。
+
+## 从源码运行
+
+使用 Python 3.11 建立虚拟环境。在 Windows PowerShell 中执行：
+
+```powershell
+git clone https://github.com/pillowAIQ/lumo-memo-notes.git
+cd lumo-memo-notes
+py -3.11 -m venv .venv
+.venv/Scripts/python.exe -m pip install -e .
 .venv/Scripts/python.exe -m memo_app
 ```
 
-## 功能
+之后可以直接运行 `run.bat`。依赖与包配置见 [pyproject.toml](pyproject.toml)，构建依赖固定版本见 [requirements-build.txt](requirements-build.txt)。
 
-### 快捷记录（Ctrl+O）
+### 验证与打包
 
-- 全局热键 **Ctrl+O** 呼出极简输入框（屏幕上方居中、置顶、半透明）
-- 输入内容 → **Enter** 保存并自动收起；**Esc** 或点击别处关闭
-- 注意：Ctrl+O 会覆盖各应用的"打开文件"快捷键（用户已确认接受）
-- 修改快捷键：编辑 `src/memo_app/controller.py` 顶部的 `HOTKEY` 常量
+```powershell
+# 单元测试（同步测试使用本地模拟 WebDAV 服务）
+.venv/Scripts/python.exe -m unittest discover -s tests
 
-### 桌面待办挂件
-
-- 主界面显示时自动隐藏；主界面最小化或关闭到托盘后，显示右下角半透明置顶面板
-- 显示未完成备忘录（最多 8 条 + "还有 N 条"提示）
-- 圆圈点击标记完成；**拖动**可移动位置；**双击空白处**打开主界面
-- 右上角 **−** 收起为标题小条，点击还原按钮恢复列表，分组展开状态保留
-- **×** 手动隐藏并关闭自动显示；托盘菜单“自动显示桌面挂件”可重新启用
-
-### 系统托盘
-
-- 关闭主窗口 = 隐藏到托盘（不退出）
-- 托盘菜单：打开主界面 / 快捷记录 / 桌面挂件开关 / 退出
-- 托盘图标为程序化绘制的松绿色笔记本图标（`src/memo_app/icons.py`）
-
-### 主界面
-
-- 卡片流列表：置顶、优先级排序；普通记录完成后移入回收站，恢复后回到待办
-- 相对时间、全文搜索、双击行内编辑（Enter 保存 / Esc 取消）
-- 右键菜单：置顶、标记完成、复制、删除；悬停 × 或 Delete 键删除
-- 回收站：软删除，可恢复 / 彻底删除 / 清空
-
-### 皮肤与设置
-
-- 三套内置皮肤：**松绿**（默认，暖纸感）、**墨夜**（深色）、**薰衣草**（浅紫）；在「设置 → 外观」切换，立即生效并记住选择
-- 侧栏左下角「设置」菜单直达各分区：常规 / 外观与皮肤 / 快捷键 / 多端同步 / 关于；设置在主窗口内整页打开，左侧分区导航，Esc 或「返回笔记」回到列表
-- 调色板与样式模板集中在 `src/memo_app/theme.py`（所有颜色都来自调色板 token）
-
-### 界面设计
-
-- 暖纸白与松绿配色，统一主界面、快捷记录、桌面挂件和对话框
-- 常驻搜索：Ctrl+F 聚焦、Esc 清空；全部 / 已置顶 / 有提醒快捷筛选
-- 标题与搜索同排，记录正文与分类、截止信息分层展示
-- 默认 1080×800，支持 680×520 紧凑窗口；分类过多时独立滚动
-- 克制动效（120–240ms，跟随 Windows「显示动画」开关）：卡片悬停浮起、新增/恢复高亮、完成/删除淡出，
-  底部轻提示支持「撤销」；快捷记录、桌面挂件、对话框淡入。实现集中在 `src/memo_app/effects.py`
-- 设计调研与实现说明：[界面升级说明](docs/research/ui-redesign.md)
-
-隔离数据的界面检查与截图：
-
-```bash
+# 隔离数据库、无托盘和全局热键的 UI 检查与截图
 .venv/Scripts/python.exe ui_smoke.py
+
+# Windows 原生样式与系统命令级最小化 / 还原检查
+.venv/Scripts/python.exe taskbar_smoke.py
+
+# 构建并验证 Windows 分发包（需要 uv）
+.\build_exe.bat
 ```
 
-检查不会读取或修改真实备忘录；截图输出至 `audit_shots/redesign/`。
+UI 截图输出到 `audit_shots/redesign/`；README 中选用的截图保存在 [docs/images](docs/images)。原生窗口检查验证样式位和系统命令路径，不等同于物理点击任务栏。打包产物为 `dist/Lumo/` 和 `build/Lumo-release.zip`，详见 [打包说明](docs/packaging.md)。
 
-## 目录结构
+### 项目结构
 
-```
-memo_app/
-├── run.bat                    # Windows 启动脚本
-├── pyproject.toml             # 打包/依赖配置
-├── src/memo_app/
-│   ├── __init__.py            # 包入口 + Windows DLL 预加载 workaround
-│   ├── __main__.py            # python -m memo_app 入口
-│   ├── db.py                  # SQLite 数据层（schema + CRUD）
-│   ├── app.py                 # PySide6 主界面（美化卡片流）
-│   ├── capture.py             # Ctrl+O 极简输入弹窗
-│   ├── widget.py              # 半透明桌面待办挂件
-│   ├── controller.py          # 编排：热键/托盘/弹窗/挂件
-│   └── icons.py               # 程序化图标绘制
-└── docs/
-    └── research/
-        └── memo-apps-survey.md   # 市面备忘录软件调研报告
+```text
+src/memo_app/
+├── app.py                 # 主窗口与备忘录卡片
+├── capture.py             # 全局快捷记录
+├── widget.py              # 桌面待办挂件
+├── controller.py          # 托盘、热键、提醒与窗口协调
+├── settings_dialog.py     # 主窗口内设置页
+├── theme.py / icons.py    # 主题与图标
+├── effects.py             # 界面动效
+├── db.py                  # SQLite 数据层
+├── single_instance.py     # 单实例与再次启动激活
+└── sync/                  # WebDAV、加密与同步引擎
 ```
 
-## 数据模型
+界面设计过程见 [界面升级说明](docs/research/ui-redesign.md)。欢迎通过 [Issues](https://github.com/pillowAIQ/lumo-memo-notes/issues) 反馈问题；请附 Windows 版本、应用版本和复现步骤，截图时遮挡个人笔记与同步账号。
 
-`memos` 表已预留扩展字段，后续加功能无需改表：
-
-| 字段 | 说明 |
-|---|---|
-| `content` | 备忘录文本 |
-| `is_pinned` | 置顶 |
-| `is_done` | 完成勾选（待办基础） |
-| `created_at` / `updated_at` | ISO 时间戳 |
-| `deleted_at` | 软删除时间（回收站） |
-
-## 已知环境问题（已修复）
-
-本机 PATH 中 `anaconda/Library/bin/icuuc.dll`（实为旧版 ICU 58）和
-`K:\main\_internal\python3.dll`（Python 3.8 shim）会抢占 PySide6 的 DLL
-解析，导致 `ImportError: DLL load failed`。`src/memo_app/__init__.py`
-中已做预加载规避；换机器/换环境如再遇到同类问题，检查 PATH 中的同名 DLL 即可。
-
-## 后续路线（详见调研报告第四节）
-
-- V2：截止日期 / 优先级 / 重复提醒（待办强化）
-- V3：标签、多端同步（先文件夹级同步，再考虑自建服务）
-- V4：剪藏、语音输入、AI 总结等
-
-## Windows 打包
-
-运行 `build_exe.bat`，使用独立标准 CPython 环境、固定依赖和按需 Qt 组件生成 `dist/Lumo`。
-分发包位于 `build/Lumo-release.zip`，完整流程与验证方式见 [轻量化打包说明](docs/packaging.md)。
-
-下载 Windows 版：[GitHub Releases](https://github.com/pillowAIQ/memo-app/releases/latest)。下载后完整解压，运行 `Lumo/Lumo.exe`。
+关键词：备忘录、便签、桌面便签、桌面备忘录、随手记、笔记软件、待办清单、待办事项、提醒、坚果云同步；memo, notes, sticky notes, to-do list, reminders, Windows, PySide6, SQLite, WebDAV。
