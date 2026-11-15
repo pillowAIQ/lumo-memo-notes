@@ -4,7 +4,7 @@
 
 **Lumo is a Windows memo and notes app with desktop sticky notes, to-do lists, reminders, global quick capture, and optional encrypted WebDAV sync.**
 
-[下载 Windows 版](https://github.com/pillowAIQ/lumo-memo-notes/releases/latest) · [同步使用指南](docs/jianguoyun-sync-user-guide.md) · [开发与打包](docs/packaging.md)
+[下载 Windows 版](https://github.com/pillowAIQ/lumo-notes/releases/latest) · [同步使用指南](docs/jianguoyun-sync-user-guide.md) · [开发与打包](docs/packaging.md)
 
 ![轻笺 Lumo 备忘录主界面：松绿主题、分类侧栏、笔记卡片与待办提醒](docs/images/main-pine.png)
 
@@ -46,7 +46,7 @@
 
 ## 下载与开始使用
 
-1. 前往 [GitHub Releases](https://github.com/pillowAIQ/lumo-memo-notes/releases/latest)，下载 Windows 分发 ZIP（当前发布文件为 `Lumo-0.2.0-windows-x64.zip`）。
+1. 前往 [GitHub Releases](https://github.com/pillowAIQ/lumo-notes/releases/latest)，下载 Windows 分发 ZIP（当前发布文件为 `Lumo-0.2.0-windows-x64.zip`）。
 2. **完整解压**压缩包，保留 `Lumo` 文件夹中的全部文件。
 3. 运行 `Lumo/Lumo.exe`，输入第一条备忘录，按 Enter 保存。
 
@@ -83,8 +83,8 @@ Windows 分发包自带运行环境，无需另装 Python。不要只复制 `Lum
 使用 Python 3.11 建立虚拟环境。在 Windows PowerShell 中执行：
 
 ```powershell
-git clone https://github.com/pillowAIQ/lumo-memo-notes.git
-cd lumo-memo-notes
+git clone https://github.com/pillowAIQ/lumo-notes.git
+cd lumo-notes
 py -3.11 -m venv .venv
 .venv/Scripts/python.exe -m pip install -e .
 .venv/Scripts/python.exe -m memo_app
@@ -126,6 +126,6 @@ src/memo_app/
 └── sync/                  # WebDAV、加密与同步引擎
 ```
 
-界面设计过程见 [界面升级说明](docs/research/ui-redesign.md)。欢迎通过 [Issues](https://github.com/pillowAIQ/lumo-memo-notes/issues) 反馈问题；请附 Windows 版本、应用版本和复现步骤，截图时遮挡个人笔记与同步账号。
+界面设计过程见 [界面升级说明](docs/research/ui-redesign.md)。欢迎通过 [Issues](https://github.com/pillowAIQ/lumo-notes/issues) 反馈问题；请附 Windows 版本、应用版本和复现步骤，截图时遮挡个人笔记与同步账号。
 
 关键词：备忘录、便签、桌面便签、桌面备忘录、随手记、笔记软件、待办清单、待办事项、提醒、坚果云同步；memo, notes, sticky notes, to-do list, reminders, Windows, PySide6, SQLite, WebDAV。

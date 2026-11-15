@@ -221,7 +221,7 @@ class TodoWidget(QWidget):
         self.more_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         root.addWidget(self.more_label)
 
-        self.hint_label = QLabel("Ctrl+O 快捷记录 · 双击打开 · 按住拖动")
+        self.hint_label = QLabel("双击打开 · 按住拖动")
         self.hint_label.setObjectName("widgetHint")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
