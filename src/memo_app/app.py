@@ -788,7 +788,16 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.setWindowTitle(f"{theme.APP_NAME} · {theme.APP_NAME_EN}")
         self.setWindowIcon(make_icon(64))
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # FramelessWindowHint 会移除 WS_SYSMENU/WS_MINIMIZEBOX/WS_MAXIMIZEBOX，
+        # 任务栏点击发来的 WM_SYSCOMMAND SC_MINIMIZE/SC_RESTORE 会被忽略；
+        # 这三个提示只补回对应原生样式位，不产生可见边框。
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.resize(1080, 800)
         self.setMinimumSize(680, 520)
         app = QApplication.instance()
