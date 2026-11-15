@@ -46,7 +46,7 @@
 
 ## 下载与开始使用
 
-1. 前往 [GitHub Releases](https://github.com/pillowAIQ/lumo-memo-notes/releases/latest)，下载 `Lumo-release.zip`。
+1. 前往 [GitHub Releases](https://github.com/pillowAIQ/lumo-memo-notes/releases/latest)，下载 Windows 分发 ZIP（当前发布文件为 `Lumo-0.2.0-windows-x64.zip`）。
 2. **完整解压**压缩包，保留 `Lumo` 文件夹中的全部文件。
 3. 运行 `Lumo/Lumo.exe`，输入第一条备忘录，按 Enter 保存。
 
