@@ -4,6 +4,22 @@ from pathlib import Path
 import sys
 from importlib.util import find_spec
 from prune_dist import QT_PLUGINS
+from build_installer import app_version
+from PyInstaller.utils.win32.versioninfo import (
+    VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable, StringStruct, VarFileInfo, VarStruct,
+)
+
+release_version = app_version()
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=tuple(map(int, release_version.split('.'))) + (0,),
+                     prodvers=tuple(map(int, release_version.split('.'))) + (0,),
+                     mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+    kids=[StringFileInfo([StringTable('040904B0', [
+        StringStruct('FileDescription', 'Lumo'), StringStruct('ProductName', 'Lumo'),
+        StringStruct('FileVersion', release_version), StringStruct('ProductVersion', release_version),
+        StringStruct('OriginalFilename', 'Lumo.exe'),
+    ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])],
+)
 
 # Conda-based project interpreters keep these standard-library dependencies
 # outside DLLs. Collect only the runtime libraries, never the entire bin folder.
@@ -42,6 +58,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='Lumo',
+    version=version_info,
     icon='src/memo_app/assets/lumo.ico',
     debug=False,
     bootloader_ignore_signals=False,

@@ -1,7 +1,15 @@
 """半透明桌面待办挂件：常驻屏幕一角，显示未完成的备忘录。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF, QTimer, Signal
+from PySide6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    Qt,
+    QRectF,
+    QSize,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QGuiApplication,
@@ -10,9 +18,11 @@ from PySide6.QtGui import (
     QPen,
 )
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -24,6 +34,12 @@ from .icons import ui_icon
 
 MAX_ROWS = 8
 GROUP_MAX_ROWS = 6
+# 列表滚动区高度上限 = min(绝对上限, 可用屏高 - 面板固定部分(标题栏/边距/提示行) - 上下安全边距)
+_SCROLL_MAX = 420
+_SCROLL_RESERVE = 170
+_SCROLL_MIN = 120
+# 面板距屏幕可用区域边缘的最小留白
+_EDGE = 8
 
 
 class GroupHeader(QWidget):
@@ -96,6 +112,25 @@ class GroupHeader(QWidget):
         super().mouseDoubleClickEvent(e)
 
 
+class _ListScrollArea(QScrollArea):
+    """列表滚动区：sizeHint 高度 = min(内容高度, maximumHeight)。
+
+    QScrollArea 默认 sizeHint 不随内容增长，adjustSize() 会把面板
+    压得过小；这里让矮内容保持紧凑、高内容撑到上限后在内部滚动。
+    """
+
+    def sizeHint(self):  # noqa: N802
+        hint = super().sizeHint()
+        content = self.widget()
+        if content is None:
+            return hint
+        h = content.sizeHint().height()
+        bound = self.maximumHeight()
+        if bound > 0:
+            h = min(h, bound)
+        return QSize(hint.width(), max(0, h))
+
+
 class TodoWidget(QWidget):
     """无边框置顶半透明小面板。可拖动，双击空白处打开主界面。"""
 
@@ -150,6 +185,17 @@ class TodoWidget(QWidget):
             QPushButton#widgetDone[done="true"] {
                 background: @ACCENT@; border-color: @ACCENT@; color: white;
             }
+            QPushButton#widgetMore {
+                border: 1px solid transparent; background: transparent;
+                color: @MORE_TEXT@; font-size: 11px; border-radius: 6px;
+                padding: 4px 10px; text-align: left;
+            }
+            QPushButton#widgetMore:hover, QPushButton#widgetMore:focus {
+                background: @MORE_HOVER@; color: @MORE_HOVER_TEXT@;
+            }
+            QPushButton#widgetMore:pressed { background: @MORE_PRESS@; }
+            QScrollArea#widgetScroll { background: transparent; border: none; }
+            QScrollArea#widgetScroll > QWidget > QWidget { background: transparent; }
             """
         )
         self._apply_style()
@@ -161,6 +207,8 @@ class TodoWidget(QWidget):
         self._memo_provider = None
         # 分组展开状态（会话内记忆，重启默认全部折叠 = 隐私默认）
         self._expanded: set[str] = set()
+        # 分组"显示全部"状态：与折叠/展开相互独立，同样会话内记忆
+        self._show_all: set[str] = set()
         self._groups: dict[str, dict] = {}
         # 已点完成、正在播放打勾反馈的条目：防止重建后重复点击导致来回切换
         self._pending_done: set[int] = set()
@@ -168,13 +216,19 @@ class TodoWidget(QWidget):
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(40)
-        self._resize_timer.timeout.connect(self.adjustSize)
+        self._resize_timer.timeout.connect(self._relayout)
         self._move_to_corner()
 
     def _apply_style(self, *_args) -> None:
         # 挂件始终是深色半透明面板；仅勾选色跟随皮肤强调色（深色皮肤用其深色版本保证白勾对比）
         accent = theme.c("accent_press" if theme.is_dark() else "accent")
-        self.setStyleSheet(self._qss.replace("@ACCENT@", accent))
+        self.setStyleSheet(
+            self._qss.replace("@ACCENT@", accent)
+            .replace("@MORE_TEXT@", theme.c("widget_more_text"))
+            .replace("@MORE_HOVER_TEXT@", theme.c("widget_more_hover_text"))
+            .replace("@MORE_HOVER@", theme.c("widget_more_hover"))
+            .replace("@MORE_PRESS@", theme.c("widget_more_press"))
+        )
 
     # ---------- 构建 ----------
 
@@ -214,7 +268,16 @@ class TodoWidget(QWidget):
         self.list_host = QVBoxLayout(self.list_panel)
         self.list_host.setSpacing(2)
         self.list_host.setContentsMargins(0, 2, 0, 0)
-        root.addWidget(self.list_panel)
+        # 列表放进有界滚动区：内容变高时内部滚动，面板本身不越出屏幕；
+        # 内容矮小时滚动区自动收缩，保持原有紧凑外观
+        self.list_scroll = _ListScrollArea()
+        self.list_scroll.setObjectName("widgetScroll")
+        self.list_scroll.setWidgetResizable(True)
+        self.list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list_scroll.setWidget(self.list_panel)
+        root.addWidget(self.list_scroll)
 
         self.more_label = QLabel("")
         self.more_label.setObjectName("widgetHint")
@@ -232,9 +295,13 @@ class TodoWidget(QWidget):
         for button in (self.min_btn, self.hide_btn):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def _set_list_visible(self, on: bool) -> None:
+        self.list_scroll.setVisible(on)
+        self.list_panel.setVisible(on)
+
     def _toggle_minimized(self) -> None:
         self._minimized = not self._minimized
-        self.list_panel.setVisible(not self._minimized)
+        self._set_list_visible(not self._minimized)
         self.hint_label.setVisible(not self._minimized)
         self.min_btn.setIcon(ui_icon(
             "restore_window" if self._minimized else "minus", "#D3DCCB", 14
@@ -242,7 +309,7 @@ class TodoWidget(QWidget):
         self.min_btn.setAccessibleName("还原桌面挂件" if self._minimized else "最小化桌面挂件")
         self.min_btn.setToolTip("还原待办列表" if self._minimized else "最小化为标题栏")
         self._resize_timer.stop()
-        self.adjustSize()
+        self._relayout()
 
     def _dismiss(self) -> None:
         self.hide()
@@ -291,22 +358,56 @@ class TodoWidget(QWidget):
             bl.setSpacing(2)
             body.setVisible(expanded)
             if expanded:
-                self._fill_group(bl, memos)
+                self._fill_group(bl, memos, key)
             self.list_host.addWidget(body)
             self._groups[key] = {"hdr": hdr, "body": body, "memos": memos}
 
         self.more_label.setVisible(False)
-        self.adjustSize()
+        self._relayout()
 
-    def _fill_group(self, lay: QVBoxLayout, memos: list[Memo]) -> None:
-        for memo in memos[:GROUP_MAX_ROWS]:
+    def _fill_group(self, lay: QVBoxLayout, memos: list[Memo], key: str) -> None:
+        show_all = key in self._show_all
+        for memo in (memos if show_all else memos[:GROUP_MAX_ROWS]):
             lay.addWidget(self._make_row(memo))
         rest = len(memos) - GROUP_MAX_ROWS
-        if rest > 0:
-            more = QLabel(f"… 还有 {rest} 条")
-            more.setObjectName("widgetHint")
-            more.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            lay.addWidget(more)
+        if show_all:
+            # 全部展开后提供"收起"回到前 6 条；条目不超过 6 条时无需按钮
+            if rest > 0:
+                lay.addWidget(self._more_button(key, "收起", True, rest))
+        elif rest > 0:
+            lay.addWidget(self._more_button(key, f"… 还有 {rest} 条", False, rest))
+
+    def _more_button(self, key: str, text: str, expanded: bool, rest: int) -> QPushButton:
+        """分组底部的"展开全部/收起"按钮：可点击、可 Tab 聚焦、可用空格/回车触发。"""
+        btn = QPushButton(text)
+        btn.setObjectName("widgetMore")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        btn.setAccessibleName(
+            f"收起，返回显示前 {GROUP_MAX_ROWS} 条" if expanded
+            else f"展开全部 {rest} 条备忘录"
+        )
+        btn.setToolTip(btn.accessibleName())
+        btn.clicked.connect(lambda _c=False, k=key: self._toggle_show_all(k))
+        return btn
+
+    def _toggle_show_all(self, key: str) -> None:
+        """只切换该组的"显示全部"并重建本组行，不动分组折叠状态。"""
+        g = self._groups.get(key)
+        if g is None:
+            return
+        if key in self._show_all:
+            self._show_all.discard(key)
+        else:
+            self._show_all.add(key)
+        lay = g["body"].layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._fill_group(lay, g["memos"], key)
+        self._resize_timer.start()
 
     def _toggle_group(self, key: str) -> None:
         """只切换该组容器显隐，不重建挂件 —— 点击即时响应。"""
@@ -318,7 +419,7 @@ class TodoWidget(QWidget):
         else:
             self._expanded.add(key)
             if g["body"].layout().count() == 0:
-                self._fill_group(g["body"].layout(), g["memos"])
+                self._fill_group(g["body"].layout(), g["memos"], key)
         expanded = key in self._expanded
         g["hdr"].set_state(expanded, len(g["memos"]))
         g["body"].setVisible(expanded)
@@ -425,6 +526,45 @@ class TodoWidget(QWidget):
             geo.bottom() - 320,
         )
 
+    def _relayout(self) -> None:
+        """尺寸变化后的统一收口：滚动区限高 → 重排 → 钳回屏幕可用区域。"""
+        self._update_scroll_bound()
+        # 滚动区 sizeHint 依赖内容高度：内容增删后必须让布局系统重算。
+        # updateGeometry 只投递 LayoutRequest（异步），这里同步冲刷，
+        # 否则随后的 adjustSize 会用到旧的尺寸缓存。
+        self.list_scroll.updateGeometry()
+        QCoreApplication.sendPostedEvents(self, QEvent.Type.LayoutRequest)
+        self.adjustSize()
+        self._clamp_to_screen()
+
+    def _update_scroll_bound(self) -> None:
+        """按当前所在屏幕的可用高度限制列表滚动区，保证面板不超出屏幕。"""
+        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        bound = min(_SCROLL_MAX, screen.availableGeometry().height() - _SCROLL_RESERVE)
+        self.list_scroll.setMaximumHeight(max(_SCROLL_MIN, bound))
+
+    def _clamp_to_screen(self) -> None:
+        """把面板矩形钳回所在屏幕的可用区域内（拖动/展开/还原后调用）。"""
+        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        geo = screen.availableGeometry()
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        if w + 2 * _EDGE <= geo.width():
+            x = min(max(self.x(), geo.left() + _EDGE), geo.right() - w - _EDGE)
+        else:
+            x = geo.left()
+        if h + 2 * _EDGE <= geo.height():
+            y = min(max(self.y(), geo.top() + _EDGE), geo.bottom() - h - _EDGE)
+        else:
+            y = geo.top()
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+
     # ---------- 绘制 / 显隐 ----------
 
     def paintEvent(self, e):  # noqa: N802
@@ -443,6 +583,8 @@ class TodoWidget(QWidget):
     def showEvent(self, e):  # noqa: N802
         effects.fade_window_in(self, effects.NORMAL)
         super().showEvent(e)
+        # 主窗口最小化后挂件重新出现等场景：尺寸/位置重新收口到屏幕内
+        self._relayout()
 
     # ---------- 拖动 ----------
 
@@ -466,6 +608,8 @@ class TodoWidget(QWidget):
         if e.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
             self._press_pos = None
             self._dragging = False
+            # 拖到屏幕边缘附近松手：钳回可用区域，避免面板被拖出可视范围
+            self._clamp_to_screen()
         super().mouseReleaseEvent(e)
 
     def mouseDoubleClickEvent(self, e):  # noqa: N802

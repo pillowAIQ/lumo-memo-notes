@@ -108,6 +108,11 @@ def init_db() -> None:
                 category_id INTEGER NOT NULL,
                 PRIMARY KEY (memo_id, category_id)
             );
+            CREATE TABLE IF NOT EXISTS memo_snooze (
+                memo_id INTEGER PRIMARY KEY,
+                remind_ts INTEGER NOT NULL,
+                until_ts INTEGER NOT NULL
+            );
             """
         )
         _migrate_memos(conn)
@@ -129,6 +134,15 @@ def _migrate_memos(conn: sqlite3.Connection) -> None:
     # 不变量：recur/remind_advance 依赖 due_ts，无截止的一律清掉
     conn.execute(
         "UPDATE memos SET recur = NULL, remind_advance = 0 WHERE due_ts IS NULL"
+    )
+    # notified 旧值语义迁移：旧版 1 = "唯一一次提醒已发"。
+    # advance=0 的条目当时触发的就是到期提醒 -> 映射为 NOTIFY_DUE(2)；
+    # advance>0 的条目当时是提前提醒 -> 保持 NOTIFY_ADVANCE(1)，
+    # 升级后到期时刻仍会按新语义补一次到期提醒。幂等：
+    # 迁移后 notified=1 只可能出现在 advance>0 的条目上。
+    conn.execute(
+        "UPDATE memos SET notified = 2 WHERE notified = 1 "
+        "AND (remind_advance = 0 OR due_ts IS NULL)"
     )
 
 
@@ -301,6 +315,9 @@ def toggle_done(memo_id: int) -> None:
                     "WHERE id = ?",
                     (nxt, now, memo_id),
                 )
+                conn.execute(
+                    "DELETE FROM memo_snooze WHERE memo_id = ?", (memo_id,)
+                )
                 sync_store.enqueue_memo(conn, memo_id)
                 return
         # 无重复或无截止时间：维持原有"完成即进回收站"行为
@@ -384,10 +401,11 @@ def _set_task_props_conn(
         and new_due is not None
         and min(7 * 1440, max(0, int(remind_advance))) != old_adv
     )
+    due_changed = due_ts is not _UNSET and old_due != due_ts
+    reset_notified = due_changed or adv_changed
     if due_ts is not _UNSET or adv_changed:
-        due_changed = due_ts is not _UNSET and old_due != due_ts
         sets.append("notified = notified * ?")
-        params.append(0 if (due_changed or adv_changed) else 1)
+        params.append(0 if reset_notified else 1)
     if due_ts is not _UNSET:
         sets.append("due_ts = ?")
         params.append(due_ts)
@@ -412,6 +430,9 @@ def _set_task_props_conn(
     conn.execute(
         f"UPDATE memos SET {', '.join(sets)} WHERE id = ?", params
     )
+    if reset_notified:
+        # due/advance change invalidates the snooze remind_ts binding
+        conn.execute("DELETE FROM memo_snooze WHERE memo_id = ?", (memo_id,))
     return True
 
 
@@ -461,26 +482,89 @@ def edit_memo(memo_id: int, content: str, props: dict | None = None) -> None:
         sync_store.enqueue_memo(conn, memo_id)
 
 
-def memos_due(now_ts: int | None = None) -> list[Memo]:
-    """到达提醒时间且未提醒的备忘录（含逾期）。
+# notified bitmask: 1=advance-stage notified, 2=due-stage notified.
+# With remind_advance>0 the advance reminder fires first; the actual due
+# time still triggers a separate due-stage reminder afterwards.
+NOTIFY_ADVANCE = 1
+NOTIFY_DUE = 2
 
-    提醒时刻 = due_ts - remind_advance 分钟；advance=0 即截止时刻。
+
+def memos_due(now_ts: int | None = None) -> list[Memo]:
+    """Memos whose reminder time has arrived and whose current stage is
+    un-notified (includes overdue; excludes actively snoozed rows).
+
+    remind time = due_ts - remind_advance minutes; notified is a stage
+    bitmask: now < due_ts needs NOTIFY_ADVANCE, now >= due_ts needs
+    NOTIFY_DUE, so an advance reminder never suppresses the due one.
+    memo_snooze.remind_ts binds the current remind time, so snoozes go
+    stale automatically when due/advance changes.
     """
     now_ts = int(time.time()) if now_ts is None else now_ts
     with db() as conn:
         rows = conn.execute(
             "SELECT * FROM memos WHERE deleted_at IS NULL AND is_done = 0 "
             "AND due_ts IS NOT NULL AND due_ts - remind_advance * 60 <= ? "
-            "AND notified = 0 ORDER BY due_ts - remind_advance * 60",
-            (now_ts,),
+            "AND (CASE WHEN ? >= due_ts THEN notified & ? "
+            "ELSE notified & ? END) = 0 "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM memo_snooze s WHERE s.memo_id = memos.id "
+            "AND s.remind_ts = memos.due_ts - memos.remind_advance * 60 "
+            "AND s.until_ts > ?"
+            ") ORDER BY due_ts - remind_advance * 60",
+            (now_ts, now_ts, NOTIFY_DUE, NOTIFY_ADVANCE, now_ts),
         ).fetchall()
     return [Memo.from_row(r) for r in rows]
 
 
-def mark_notified(memo_id: int) -> None:
-    """标记已提醒：本机状态，不动 updated_at，不产生同步变更。"""
+def reminder_stage(memo: Memo, now_ts: int | None = None) -> int:
+    """Stage bit pending for this memo at the given time."""
+    now_ts = int(time.time()) if now_ts is None else now_ts
+    return NOTIFY_DUE if now_ts >= int(memo.due_ts or 0) else NOTIFY_ADVANCE
+
+
+def mark_notified(memo_id: int, stage: int = NOTIFY_ADVANCE) -> None:
+    """Mark a reminder stage as notified (bitwise-or): local state only,
+    does not touch updated_at and produces no sync revision."""
     with db() as conn:
-        conn.execute("UPDATE memos SET notified = 1 WHERE id = ?", (memo_id,))
+        conn.execute(
+            "UPDATE memos SET notified = notified | ? WHERE id = ?",
+            (int(stage), memo_id),
+        )
+
+
+def get_memo(memo_id: int) -> Memo | None:
+    """Fetch one memo by id (including trash/done); None if missing."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM memos WHERE id = ?", (memo_id,)
+        ).fetchone()
+    return Memo.from_row(row) if row is not None else None
+
+
+def snooze_memo(
+    memo_id: int, seconds: int = 300, now_ts: int | None = None
+) -> bool:
+    """Locally snooze a reminder: writes memo_snooze and resets notified so
+    the memo re-arms after the quiet period. remind_ts binds the current
+    remind moment; due/advance changes invalidate it automatically.
+    Does not touch due_ts / updated_at / outbox; survives restarts."""
+    now_ts = int(time.time()) if now_ts is None else int(now_ts)
+    seconds = max(1, int(seconds))
+    with db() as conn:
+        row = conn.execute(
+            "SELECT due_ts, remind_advance FROM memos WHERE id = ?", (memo_id,)
+        ).fetchone()
+        if row is None or row["due_ts"] is None:
+            return False
+        remind_ts = int(row["due_ts"]) - int(row["remind_advance"] or 0) * 60
+        conn.execute(
+            "INSERT INTO memo_snooze(memo_id, remind_ts, until_ts) VALUES (?,?,?)"
+            " ON CONFLICT(memo_id) DO UPDATE SET"
+            " remind_ts=excluded.remind_ts, until_ts=excluded.until_ts",
+            (memo_id, remind_ts, now_ts + seconds),
+        )
+        conn.execute("UPDATE memos SET notified = 0 WHERE id = ?", (memo_id,))
+        return True
 
 
 def soft_delete(memo_id: int) -> None:
@@ -510,6 +594,7 @@ def purge(memo_id: int) -> None:
             "SELECT uuid FROM memos WHERE id = ?", (memo_id,)
         ).fetchone()
         conn.execute("DELETE FROM memo_categories WHERE memo_id = ?", (memo_id,))
+        conn.execute("DELETE FROM memo_snooze WHERE memo_id = ?", (memo_id,))
         conn.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
         if row is not None and row["uuid"]:
             sync_store.enqueue_memo_delete(conn, row["uuid"])
@@ -521,6 +606,8 @@ def purge_all_trash() -> int:
             "SELECT id, uuid FROM memos WHERE deleted_at IS NOT NULL"
         ).fetchall()
         conn.execute("DELETE FROM memo_categories WHERE memo_id IN "
+                     "(SELECT id FROM memos WHERE deleted_at IS NOT NULL)")
+        conn.execute("DELETE FROM memo_snooze WHERE memo_id IN "
                      "(SELECT id FROM memos WHERE deleted_at IS NOT NULL)")
         conn.execute("DELETE FROM memos WHERE deleted_at IS NOT NULL")
         for r in rows:

@@ -495,7 +495,7 @@ class SyncSettingsPage(_Page):
         self.sync_enabled = Switch()
         self.sync_enabled.setChecked(svc.enabled)
         self.sync_enabled.setAccessibleName("启用多设备同步")
-        switch_card.add(setting_row("启用多设备同步", "开启后修改会在后台自动同步；更改此项后点底部「保存同步设置」生效。", self.sync_enabled))
+        switch_card.add(setting_row("启用多设备同步", "开启后每 30 分钟在后台自动同步，编辑后约 20 秒也会自动同步；更改此项后点底部「保存同步设置」生效。", self.sync_enabled))
 
         # ── 账号设置 ────────────────────────────────────
         account = self.group("坚果云账号")
@@ -871,6 +871,9 @@ class AboutPage(_Page):
         hero.addLayout(col, 1)
         self.lay.addLayout(hero)
         self.lay.addSpacing(26)
+        from .updater import UpdatePanel
+        updates = self.group("软件更新")
+        updates.layout().addWidget(UpdatePanel())
         card = self.group("特性")
         for title, desc in (
             ("全局快捷记录", "任何应用中呼出输入框，回车即存，支持「明天9点」等自然语言提醒。"),

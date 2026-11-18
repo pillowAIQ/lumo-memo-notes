@@ -4,7 +4,7 @@
 
 **Lumo is a Windows memo and notes app with desktop sticky notes, to-do lists, reminders, global quick capture, and optional encrypted WebDAV sync.**
 
-[下载 Windows 版](https://github.com/pillowAIQ/lumo-notes/releases/latest) · [同步使用指南](docs/jianguoyun-sync-user-guide.md) · [开发与打包](docs/packaging.md)
+[下载 Windows 版](https://github.com/pillowAIQ/lumo-notes/releases/latest) · [安装与更新](docs/installation-and-updates.md) · [同步使用指南](docs/jianguoyun-sync-user-guide.md) · [开发与打包](docs/packaging.md)
 
 ![轻笺 Lumo 备忘录主界面：松绿主题、分类侧栏、笔记卡片与待办提醒](docs/images/main-pine.png)
 
@@ -14,11 +14,12 @@
 | --- | --- |
 | 灵感来了，马上记下 | 默认 **Ctrl+O** 全局呼出快捷输入框，Enter 保存；支持 `/分类名` 和 Tab 补全 |
 | 日常笔记与备忘 | 分类、置顶、内容搜索、双击编辑；删除后可从回收站恢复 |
-| 管理待办事项 | 优先级、截止时间、重复提醒，支持“明天9点”等自然语言时间输入 |
-| 桌面随时查看 | 半透明置顶待办挂件，按分类展开、勾选完成、拖动位置或收起为标题条 |
+| 管理待办事项 | 优先级、截止时间、重复提醒，支持“明天9点”等自然语言时间输入；到期置顶弹窗和声音提醒，可完成或延后 5 分钟 |
+| 桌面随时查看 | 半透明置顶待办挂件，按分类展开；点击“还有 N 条”查看全部，过长时滚动浏览；支持勾选完成、拖动和收起为标题条 |
 | 按喜好换皮肤 | 松绿、墨夜、薰衣草三套主题，切换后立即生效 |
-| 多台 Windows 电脑接着写 | 可选坚果云 WebDAV 双向同步，AES-256-GCM 加密，支持冲突副本 |
+| 多台 Windows 电脑接着写 | 可选坚果云 WebDAV 双向同步，每 30 分钟定时同步，编辑后约 20 秒同步，也可手动同步；AES-256-GCM 加密，支持冲突副本 |
 | 本地使用 | SQLite 本地存储，无需配置云端即可记录；关闭主窗口后可驻留托盘 |
+| 安装与升级 | 0.3.0 起支持当前用户安装、卸载，以及「设置 → 关于」检查、下载、校验和安装新版 |
 
 ## 应用截图
 
@@ -38,6 +39,10 @@
 
 ![桌面待办挂件：按分类展开与勾选完成](docs/images/desktop-todo.png)
 
+点击“还有 N 条”可展开该分类的全部记录；条目较多时滚动查看，底部“收起”恢复前 6 条。
+
+![桌面待办挂件：展开全部记录并滚动浏览](docs/images/desktop-todo-expanded.png)
+
 ### 在应用内管理同步
 
 设置页集中管理常规、外观、快捷键、多端同步和关于；同步需要自行配置 WebDAV 账号与同步库密码。
@@ -46,11 +51,19 @@
 
 ## 下载与开始使用
 
-1. 前往 [GitHub Releases](https://github.com/pillowAIQ/lumo-notes/releases/latest)，下载 Windows 分发 ZIP（当前发布文件为 `Lumo-0.2.0-windows-x64.zip`）。
-2. **完整解压**压缩包，保留 `Lumo` 文件夹中的全部文件。
-3. 运行 `Lumo/Lumo.exe`，输入第一条备忘录，按 Enter 保存。
+从 0.3.0 起支持安装版：退出旧版后运行 `Lumo-<版本>-windows-x64-setup.exe`，完成安装后从开始菜单打开轻笺。安装版继续使用现有数据库、设置和同步凭据。以后可在「设置 → 关于 → 软件更新」检查新版，下载并确认安装。
+
+发布页若仍只有旧版本 ZIP，可以**完整解压**后运行 `Lumo/Lumo.exe`。安装包需由维护者单独发布到 [GitHub Releases](https://github.com/pillowAIQ/lumo-notes/releases/latest) 才能被更新功能发现；本地构建不会自动上传。
 
 Windows 分发包自带运行环境，无需另装 Python。不要只复制 `Lumo.exe`，它需要同目录的 `_internal` 依赖。
+
+安装、升级和卸载均保留独立数据目录。详见 [安装与更新说明](docs/installation-and-updates.md)。
+
+### 醒目的到期提醒
+
+到期事项会集中出现在独立置顶窗口，并播放系统提示音；提醒持续显示，支持完整内容、完成、5 分钟后提醒和打开主界面。提前提醒不会抑制实际到期时的提醒。需要应用保持运行、电脑处于唤醒状态。
+
+![轻笺到期提醒：完整内容、完成、稍后提醒和打开主界面](docs/images/reminder.png)
 
 ### 常用操作
 

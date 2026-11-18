@@ -224,9 +224,11 @@ class Controller(QObject):
         self.win._on_sync_status(self.sync.status_text)
         QApplication.instance().aboutToQuit.connect(self.sync.shutdown)
 
-        # 截止提醒：每 30s 扫一次已到期未提醒的备忘录
+        from .reminders import ReminderManager
+        self.reminders = ReminderManager(win.toggle_done, self.show_main, self)
+        # 独立置顶弹窗，不依赖 Windows 托盘通知是否被系统屏蔽。
         self._remind_timer = QTimer(self)
-        self._remind_timer.setInterval(30_000)
+        self._remind_timer.setInterval(5_000)
         self._remind_timer.timeout.connect(self._check_reminders)
         self._remind_timer.start()
         QTimer.singleShot(3000, self._check_reminders)
@@ -422,6 +424,8 @@ class Controller(QObject):
 
     def _prepare_quit(self) -> None:
         self._quitting = True
+        self._remind_timer.stop()
+        self.reminders.shutdown()
         self.widget.hide()
 
     def _on_tray_activated(self, reason) -> None:
@@ -443,22 +447,11 @@ class Controller(QObject):
             self.win.reload()
 
     def _check_reminders(self) -> None:
-        """扫描到期备忘录，通过系统托盘气泡提醒。"""
+        """扫描到期备忘录，合并显示在持续可见的置顶提醒窗口。"""
         try:
-            due = db.memos_due()
+            self.reminders.check()
         except Exception:
-            return
-        for m in due:
-            if self.tray is None:
-                # 无托盘时无法弹气泡，跳过标记，等托盘可用再提醒
-                continue
-            db.mark_notified(m.id)
-            self.tray.showMessage(
-                f"{theme.APP_NAME}提醒",
-                f"{m.content[:40]}\n{nlp_time.format_due(m.due_ts)}",
-                QSystemTrayIcon.MessageIcon.Information,
-                5000,
-            )
+            logger.exception("到期提醒检查失败，将在下一轮重试")
         self._refresh_badges()  # 顺带刷新逾期标红（含提前提醒已触发的条目）
 
     def _refresh_badges(self) -> None:

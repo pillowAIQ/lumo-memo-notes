@@ -50,6 +50,14 @@ def main() -> None:
         sys.exit(3)
 
     _setup_logging()
+    app.setApplicationVersion(theme.APP_VERSION)
+    if sys.platform == "win32":
+        # Kept until process exit so the installer never replaces a running app.
+        import ctypes
+        kernel = ctypes.windll.kernel32
+        kernel.CreateMutexW.restype = ctypes.c_void_p
+        kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        app._installer_mutex = kernel.CreateMutexW(None, False, "Local\\LumoInstallerRunning-v1")
     theme.apply(theme.saved_name())  # 全局样式：按上次选择的皮肤
 
     win = MainWindow()

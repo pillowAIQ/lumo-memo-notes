@@ -25,7 +25,7 @@ CONFLICT_MODES = ("lww", "keep")
 logger = logging.getLogger("memo_app.sync.service")
 
 DEFAULT_BASE_URL = "https://dav.jianguoyun.com/dav/"
-PERIODIC_MS = 120_000       # 周期拉取间隔
+PERIODIC_MS = 30 * 60 * 1000  # 周期拉取间隔：每 30 分钟
 DEBOUNCE_MS = 20_000        # 编辑后防抖上传
 STARTUP_DELAY_MS = 8_000    # 启动后首同步延迟
 

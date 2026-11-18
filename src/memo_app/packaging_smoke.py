@@ -18,6 +18,8 @@ def verify(report_path):
             from PySide6.QtSvg import QSvgRenderer
             from PySide6.QtWidgets import QApplication, QSystemTrayIcon
             app = QApplication([])
+            from . import theme
+            report["version"] = theme.APP_VERSION
             app.setOrganizationName("memo-package-check")
             app.setApplicationName(uuid.uuid4().hex)
             QSettings.setDefaultFormat(QSettings.Format.IniFormat)
@@ -30,6 +32,17 @@ def verify(report_path):
             db.add_memo("packaged SQLite check", cat_name="test")
             assert db.list_memos()[0].content == "packaged SQLite check"
             report["checks"].append("SQLite read/write")
+            from .reminders import ReminderManager
+            reminder_id = db.add_memo("isolated packaged reminder", due_ts=1)
+            reminders = ReminderManager(db.toggle_done, lambda: None, clock=lambda: 1, sound=lambda: None)
+            reminders.check()
+            assert reminders.dialog.isVisible() and not reminders.dialog.grab().isNull()
+            reminders.shutdown()
+            db.purge(reminder_id)
+            if os.name == "nt":
+                import winsound  # Verify bundled backend without playing audio.
+                assert callable(winsound.MessageBeep)
+            report["checks"].append("Persistent reminders and Windows sound backend")
             from .sync import crypto, credentials
             mk = crypto.generate_master_key()
             sealed = crypto.seal_vault(mk, "temporary-package-password")

@@ -13,6 +13,9 @@
 - `build/Lumo-release.zip`：相同版本的压缩分发包；解压后运行。
 - `build/release-report.json`：文件体积、主要组件和检查结果。
 - `build/package-verification.json`：最终 EXE 的隔离验证结果。
+- `build/Lumo-<版本>-windows-x64-setup.exe`：用 `build_installer.py` 另行构建的安装包，及 `SHA256SUMS.txt` 校验文件。
+
+安装包、应用内更新和发布步骤见 [安装与更新说明](installation-and-updates.md)。本地构建不会自动发布 GitHub Release。
 
 构建先在 `build/release-stage` 生成候选包，通过验证后归并到 `dist/Lumo`，旧正式版本移入回收站。不会更改真实数据库、同步配置和账号凭据。
 应用更名为轻笺（Lumo）后，旧版 `dist/Lumo` 不会被自动删除，确认新版可用后可手动移除；数据目录与设置保持不变。

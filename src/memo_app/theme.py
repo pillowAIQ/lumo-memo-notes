@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor
 
 APP_NAME = "轻笺"
 APP_NAME_EN = "Lumo"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 _ASSETS = Path(__file__).parent / "assets"
 _CHECK = (_ASSETS / "check.png").as_posix()
@@ -38,6 +38,8 @@ PINE = {
     "trash_bg": "#F5EDE2", "trash_border": "#E9DCC7", "trash_text": "#7D674B", "trash_hover": "#EDE0CE",
     "toast_bg": "#284C3B", "toast_border": "#1F3E30", "toast_text": "#F4F7F1", "toast_accent": "#CFE3C6",
     "scroll": "#D3DCCD", "scroll_hover": "#A6B69D",
+    "widget_more_text": "#D3DCCB", "widget_more_hover_text": "#E2EBD9",
+    "widget_more_hover": "rgba(209, 224, 196, 35)", "widget_more_press": "rgba(209, 224, 196, 60)",
 }
 
 INK = {
@@ -57,6 +59,8 @@ INK = {
     "trash_bg": "#2B2620", "trash_border": "#3D342A", "trash_text": "#D8C1A0", "trash_hover": "#3A3128",
     "toast_bg": "#E4ECE7", "toast_border": "#C9D6CE", "toast_text": "#17211C", "toast_accent": "#1F6F52",
     "scroll": "#3A4148", "scroll_hover": "#56616B",
+    "widget_more_text": "#D3DCCB", "widget_more_hover_text": "#E2EBD9",
+    "widget_more_hover": "rgba(209, 224, 196, 35)", "widget_more_press": "rgba(209, 224, 196, 60)",
 }
 
 LAVENDER = {
@@ -76,6 +80,8 @@ LAVENDER = {
     "trash_bg": "#F7EEF2", "trash_border": "#EBD9E2", "trash_text": "#7E5468", "trash_hover": "#EFDFE7",
     "toast_bg": "#3A2F66", "toast_border": "#2E2552", "toast_text": "#F6F4FF", "toast_accent": "#D9CFFF",
     "scroll": "#D9D3E6", "scroll_hover": "#B3A8CC",
+    "widget_more_text": "#D3DCCB", "widget_more_hover_text": "#E2EBD9",
+    "widget_more_hover": "rgba(209, 224, 196, 35)", "widget_more_press": "rgba(209, 224, 196, 60)",
 }
 
 PALETTES = {"pine": PINE, "ink": INK, "lavender": LAVENDER}
