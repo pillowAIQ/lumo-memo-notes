@@ -5,7 +5,7 @@
 ## 第一次从便携版改用安装版
 
 1. 从系统托盘菜单退出正在运行的轻笺。
-2. 运行 `Lumo-0.3.0-windows-x64-setup.exe`，按安装向导操作。
+2. 从 [GitHub Releases](https://github.com/pillowAIQ/lumo-notes/releases/latest) 下载最新版 `Lumo-<版本>-windows-x64-setup.exe`，按安装向导操作。
 3. 默认只为当前 Windows 用户安装到 `%LOCALAPPDATA%\Programs\Lumo`，无需管理员权限。
 4. 从开始菜单打开“轻笺 Lumo”；安装时也可选择创建桌面快捷方式。
 

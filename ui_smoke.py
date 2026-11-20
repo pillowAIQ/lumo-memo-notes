@@ -18,7 +18,7 @@ import memo_app  # noqa: F401 - load Windows DLLs before importing Qt
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from memo_app import db, effects
 from memo_app.app import CategoryRow, MainWindow, MemoItemWidget, NameDialog
@@ -111,6 +111,33 @@ class SettingsControllerStub:
         return True
 
 
+def check_manual_sync(ctl: Controller, win: MainWindow) -> None:
+    def click_button(role: QMessageBox.ButtonRole) -> None:
+        box = QApplication.activeModalWidget()
+        for button in box.buttons():
+            if box.buttonRole(button) == role:
+                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                return
+        box.reject()
+        raise AssertionError(f"Manual sync dialog is missing {role.name}")
+
+    with patch.object(ctl.sync, "sync_now") as sync_now:
+        for role, mode in (
+            (QMessageBox.ButtonRole.AcceptRole, "lww"),
+            (QMessageBox.ButtonRole.ActionRole, "keep"),
+            (QMessageBox.ButtonRole.RejectRole, None),
+        ):
+            QTimer.singleShot(0, lambda role=role: click_button(role))
+            ctl.sync_now_interactive(win)
+            if mode is None:
+                sync_now.assert_not_called()
+            else:
+                sync_now.assert_called_once_with(mode)
+            sync_now.reset_mock()
+        settle()
+        assert not win.findChildren(QMessageBox)
+
+
 def check_window_visibility() -> None:
     # Exercise the real controller wiring without a real tray, hotkey or setting.
     with (
@@ -127,6 +154,7 @@ def check_window_visibility() -> None:
         try:
             win.show()
             settle()
+            check_manual_sync(ctl, win)
             assert not ctl.widget.isVisible() and ctl.a_widget.isChecked()
             win.titlebar.min_btn.click()
             settle()

@@ -18,9 +18,11 @@ from PySide6.QtWidgets import QApplication
 from memo_app import updater as u
 
 app = QApplication.instance() or QApplication([])
+CURRENT_VERSION = "0.3.0"
+UPDATE_VERSION = "0.4.0"
 
 
-def metadata(version="0.4.0", payload=b"installer"):
+def metadata(version=UPDATE_VERSION, payload=b"installer"):
     name = f"Lumo-{version}-windows-x64-setup.exe"
     return {"tag_name": f"v{version}", "body": "<b>plain release text</b>", "assets": [{
         "name": name, "size": len(payload), "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
@@ -38,10 +40,10 @@ class Response(io.BytesIO):
 class UpdateTests(unittest.TestCase):
     def test_versions_and_stable_policy(self):
         self.assertGreater(u.version_tuple("0.10.0"), u.version_tuple("0.9.0"))
-        self.assertIsNone(u.parse_release(metadata("0.3.0"), "0.3.0"))
-        self.assertIsNone(u.parse_release(metadata("0.2.0"), "0.3.0"))
+        self.assertIsNone(u.parse_release(metadata(CURRENT_VERSION), CURRENT_VERSION))
+        self.assertIsNone(u.parse_release(metadata("0.2.0"), CURRENT_VERSION))
         m = metadata(); m["prerelease"] = True
-        self.assertIsNone(u.parse_release(m))
+        self.assertIsNone(u.parse_release(m, CURRENT_VERSION))
         for bad in ("v0.4.0-beta", "../../x", None, "0.04.0"):
             with self.assertRaises(u.UpdateError): u.version_tuple(bad)
 
@@ -49,9 +51,9 @@ class UpdateTests(unittest.TestCase):
         for field, value in (("digest", ""), ("size", -1), ("size", True),
                              ("browser_download_url", "https://evil.test/setup.exe")):
             m = metadata(); m["assets"][0][field] = value
-            with self.assertRaises(u.UpdateError): u.parse_release(m)
+            with self.assertRaises(u.UpdateError): u.parse_release(m, CURRENT_VERSION)
         m = metadata(); m["assets"] = []
-        with self.assertRaisesRegex(u.UpdateError, "尚未上传"): u.parse_release(m)
+        with self.assertRaisesRegex(u.UpdateError, "尚未上传"): u.parse_release(m, CURRENT_VERSION)
 
     def test_reject_redirects_and_http(self):
         for url in ("http://github.com/x", "https://github.com.evil.test/x",
@@ -62,7 +64,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_download_and_reverify(self):
         payload = b"installer"
-        release = u.parse_release(metadata(payload=payload))
+        release = u.parse_release(metadata(payload=payload), CURRENT_VERSION)
         with tempfile.TemporaryDirectory() as temp:
             opener = lambda req, **kw: Response(payload, release.url, len(payload))
             path = u.download_installer(release, temp, threading.Event(), opener=opener)
@@ -73,7 +75,7 @@ class UpdateTests(unittest.TestCase):
                 launch.assert_not_called()
 
     def test_failures_and_cancellation_remove_partials(self):
-        release = u.parse_release(metadata())
+        release = u.parse_release(metadata(), CURRENT_VERSION)
         with tempfile.TemporaryDirectory() as temp:
             sentinel = Path(temp) / "keep.txt"; sentinel.write_text("keep")
             for payload in (b"wronghash", b"short", b"x" * 100):
@@ -87,7 +89,8 @@ class UpdateTests(unittest.TestCase):
 
     def test_source_cannot_launch_installer(self):
         with patch.object(u, "installable_runtime", return_value=False), patch.object(u.subprocess, "Popen") as launch:
-            with self.assertRaises(u.UpdateError): u.launch_installer(Path("anything.exe"), u.parse_release(metadata()))
+            release = u.parse_release(metadata(), CURRENT_VERSION)
+            with self.assertRaises(u.UpdateError): u.launch_installer(Path("anything.exe"), release)
             launch.assert_not_called()
 
     def test_close_panel_during_check(self):
@@ -97,7 +100,10 @@ class UpdateTests(unittest.TestCase):
             return Response(json.dumps(metadata()).encode(), u.API_URL)
         with tempfile.TemporaryDirectory() as temp:
             service = u.UpdateManager(app, cache=temp, opener=opener)
-            with patch.object(u, "manager", return_value=service):
+            with (
+                patch.object(u.theme, "APP_VERSION", CURRENT_VERSION),
+                patch.object(u, "manager", return_value=service),
+            ):
                 panel = u.UpdatePanel(); panel.show(); service.check()
                 panel.close(); panel.deleteLater()
                 QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -106,7 +112,7 @@ class UpdateTests(unittest.TestCase):
                     QTest.qWait(10)
                     if not service.busy: break
                 self.assertFalse(service.busy)
-                self.assertEqual(service.release.version, "0.4.0")
+                self.assertEqual(service.release.version, UPDATE_VERSION)
             service.shutdown(); service.deleteLater()
 
 

@@ -1,8 +1,0 @@
-# Standard CPython 3.11; packaging dependencies pinned separately from development.
--e .
-PySide6-Essentials==6.12.0
-pynput==1.8.2
-cryptography==50.0.2
-keyring==25.7.0
-pyinstaller==6.22.3
-pyinstaller-hooks-contrib==2026.10

@@ -469,10 +469,8 @@ class Controller(QObject):
 
     def sync_now_interactive(self, parent=None) -> None:
         """手动同步：先让用户选择冲突处理策略（标题栏同步菜单入口）。"""
-        from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QMessageBox
         box = QMessageBox(parent)
-        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         box.setWindowTitle("同步冲突处理")
         box.setText("两台设备同时修改同一条备忘录时如何处理？")
         box.setInformativeText(
@@ -486,7 +484,9 @@ class Controller(QObject):
         )
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
+        # exec() 返回后仍需读取选择，再释放弹窗。
         clicked = box.clickedButton()
+        box.deleteLater()
         if clicked is b_lww:
             self.sync.sync_now("lww")
         elif clicked is b_keep:
