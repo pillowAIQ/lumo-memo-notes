@@ -1,6 +1,7 @@
 # AGENTS.md
 
 ## Environment
+- The venv is managed by uv (Python 3.11 pinned in `.python-version`, deps locked in `uv.lock`). Create/refresh it with `uv sync`; change deps via `pyproject.toml` + `uv lock`, never `pip install`.
 - Always use `.venv/Scripts/python.exe`; bare `python` is the Windows Store stub.
 
 ## Verification

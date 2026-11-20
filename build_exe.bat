@@ -6,11 +6,8 @@ if errorlevel 1 (
     echo Please install uv, then run this script again.
     exit /b 1
 )
-if not exist ".venv\Scripts\python.exe" (
-    echo Missing .venv\Scripts\python.exe. Set up the project environment first.
-    exit /b 1
-)
-uv pip sync requirements-build.txt --python .venv\Scripts\python.exe
+rem uv.lock pins every dependency; --locked fails instead of silently re-resolving.
+uv sync --locked
 if errorlevel 1 exit /b 1
 .venv\Scripts\python.exe build_release.py
 exit /b %errorlevel%

@@ -6,13 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "memo-app"
 version = "0.3.0"
 description = "个人极简备忘录（Windows / Python + PySide6 / SQLite）"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "PySide6-Essentials>=6.6",
     "pynput>=1.7",
     "cryptography>=42",
     "keyring>=24",
 ]
+
+[dependency-groups]
+# 打包依赖（PyInstaller）；uv sync 默认安装，build_exe.bat 使用 uv sync --locked
+build = [
+    "pyinstaller==6.22.3",
+    "pyinstaller-hooks-contrib==2026.10",
+]
+
+[tool.uv]
+default-groups = ["build"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

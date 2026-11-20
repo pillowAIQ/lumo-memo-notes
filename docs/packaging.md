@@ -2,7 +2,7 @@
 
 ## 一条命令
 
-在项目根目录运行 `build_exe.bat`。需要 uv 和已配置好的项目虚拟环境 `.venv`；脚本使用项目 `.venv` 并从 `requirements-build.txt` 安装固定版本。
+在项目根目录运行 `build_exe.bat`。需要 uv；脚本先执行 `uv sync --locked`，按 `uv.lock` 在项目 `.venv`（Python 3.11）中安装固定版本，锁文件与 `pyproject.toml` 不一致时直接失败。
 解释器统一使用 AGENTS.md 指定的 `.venv/Scripts/python.exe`。构建环境仅安装 PySide6-Essentials，不安装 Qt Addons、WebEngine、PDF 扩展。
 
 运行前从系统托盘退出轻笺（Lumo）；构建流程不会强制结束正在使用的程序。
@@ -44,10 +44,11 @@ Qt hooks 根据实际导入收集依赖；`prune_dist.py` 在收集前过滤未�
 
 最终 EXE 验证在临时数据库、独立 QSettings 和随机测试凭据服务下运行；不访问真实云端。验证失败时不替换正式版本。
 
-更改依赖时修改 `requirements-build.in`，然后执行：
+更改依赖时修改 `pyproject.toml`（运行依赖在 `[project].dependencies`，打包依赖在 `[dependency-groups].build`），然后执行：
 
 ```powershell
-uv pip compile requirements-build.in --python .venv/Scripts/python.exe --output-file requirements-build.txt
+uv lock
+uv sync
 ```
 
 依赖升级后重新运行完整打包流程。体积数字是此版本和当前 Windows 环境的测量结果，不能代替其他 Windows 版本的兼容性测试。

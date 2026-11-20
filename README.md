@@ -93,17 +93,16 @@ Windows 分发包自带运行环境，无需另装 Python。不要只复制 `Lum
 
 ## 从源码运行
 
-使用 Python 3.11 建立虚拟环境。在 Windows PowerShell 中执行：
+用 [uv](https://docs.astral.sh/uv/) 管理 Python 3.11 虚拟环境（版本由 `.python-version` 固定，依赖由 `uv.lock` 锁定）。在 Windows PowerShell 中执行：
 
 ```powershell
 git clone https://github.com/pillowAIQ/lumo-notes.git
 cd lumo-notes
-py -3.11 -m venv .venv
-.venv/Scripts/python.exe -m pip install -e .
+uv sync
 .venv/Scripts/python.exe -m memo_app
 ```
 
-之后可以直接运行 `run.bat`。依赖与包配置见 [pyproject.toml](pyproject.toml)，构建依赖固定版本见 [requirements-build.txt](requirements-build.txt)。
+之后可以直接运行 `run.bat`。依赖与包配置见 [pyproject.toml](pyproject.toml)，全部依赖（含打包用的 PyInstaller）的固定版本见 [uv.lock](uv.lock)。
 
 ### 验证与打包
 
