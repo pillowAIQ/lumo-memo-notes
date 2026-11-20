@@ -17,6 +17,9 @@
 ## UI conventions
 - App display name 轻笺 · Lumo (exe `Lumo.exe`); internal ids stay `memo`/`memo_app` (QSettings, data dir, credentials) — do not rename them.
 - Skins: palettes + QSS template in `src/memo_app/theme.py`; use `theme.c(token)` / `theme.qc(token)` instead of hex literals, and refresh icons on `theme.notifier.changed`.
+- Styles (`theme.STYLES`: `mica` default = 3 panes + date-grouped list + always-on detail pane; `paper` = serif journal, calendar-page sidebar, ruled list, detail pane only while a memo is selected) are orthogonal to skins. QSettings keys: `theme` (skin) and `ui_style`. Both styles share one widget tree; branch with `theme.is_paper()` in paint code and put style-only rules in `_MICA_QSS` / `_PAPER_QSS`. `theme.apply_style(k)` also switches to that style's recommended skin.
+- The main list contains non-selectable group-header items (`UserRole` is None): use `MainWindow.memo_items()` / `memo_count()`, not `list.count()`.
+- `DetailPane` (`detail_pane.py`) saves immediately; anything that writes from inside a list selection signal must be deferred (`QTimer.singleShot(0, ...)`) because writes trigger `reload()`, which rebuilds the QListWidget.
 - Settings live in `settings_dialog.py` as an in-window `SettingsView` (pages: general/appearance/hotkeys/sync/about), opened via `MainWindow.open_settings(page)`.
 - Palette/QSS: `src/memo_app/theme.py`; icons: `src/memo_app/icons.py`; motion: `src/memo_app/effects.py`.
 - Memo cards and the composer are custom-painted (paintEvent), not styled via QSS.

@@ -41,6 +41,29 @@ _SCROLL_MIN = 120
 # 面板距屏幕可用区域边缘的最小留白
 _EDGE = 8
 
+# 挂件配色随风格：云母 = 深色亚克力（文字浅色），纸笺 = 钉在桌面上的纸条（文字墨色）
+_MICA_COLORS = {
+    "panel": (30, 36, 48, 190), "edge": (255, 255, 255, 40),
+    "title": "#F5F7FB", "count": "#B9C2D0", "item": "#EEF1F6", "meta": "#AEB8C6", "hint": "#97A2B3",
+    "group": "#DCE3EE", "icon": "#C3CCD9", "ring": "#9AA5B5", "ring_hover": "#C8D6F0",
+    "hover": "rgba(255, 255, 255, 18)", "hover_strong": "rgba(255, 255, 255, 32)",
+    "press": "rgba(255, 255, 255, 50)", "focus": "#8FB2F5", "pin": "#F2C66D",
+    "font_title": "", "font_body": "",
+}
+_PAPER_COLORS = {
+    "panel": (251, 247, 238, 238), "edge": (120, 95, 60, 60),
+    "title": "#2A2521", "count": "#B4412E", "item": "#3A322B", "meta": "#83786B", "hint": "#A29788",
+    "group": "#5B5048", "icon": "#83786B", "ring": "#6B6157", "ring_hover": "#B4412E",
+    "hover": "rgba(120, 95, 60, 20)", "hover_strong": "rgba(120, 95, 60, 34)",
+    "press": "rgba(120, 95, 60, 52)", "focus": "#C9735F", "pin": "#B4412E",
+    "font_title": 'font-family: "Noto Serif SC", "STSong", "SimSun", serif;',
+    "font_body": 'font-family: "Noto Serif SC", "STSong", "Microsoft YaHei UI", serif;',
+}
+
+
+def wcolor(key: str):
+    return (_PAPER_COLORS if theme.is_paper() else _MICA_COLORS)[key]
+
 
 class GroupHeader(QWidget):
     """挂件里的分类分组头：点击切换展开/折叠。"""
@@ -61,7 +84,7 @@ class GroupHeader(QWidget):
         lay.setSpacing(5)
 
         self.arrow = QLabel()
-        self.arrow.setPixmap(ui_icon("chevron_down" if expanded else "chevron_right", "#D3DCCB", 12).pixmap(12, 12))
+        self.arrow.setPixmap(ui_icon("chevron_down" if expanded else "chevron_right", wcolor("icon"), 12).pixmap(12, 12))
         self.arrow.setObjectName("widgetGroupArrow")
         self.full_title = title
         self.name = QLabel(title)
@@ -79,7 +102,7 @@ class GroupHeader(QWidget):
         lay.addWidget(cnt)
 
     def set_state(self, expanded: bool, count: int) -> None:
-        self.arrow.setPixmap(ui_icon("chevron_down" if expanded else "chevron_right", "#D3DCCB", 12).pixmap(12, 12))
+        self.arrow.setPixmap(ui_icon("chevron_down" if expanded else "chevron_right", wcolor("icon"), 12).pixmap(12, 12))
         # 右侧计数在 layout 最后一个 widget
         self.layout().itemAt(self.layout().count() - 1).widget().setText(str(count))
 
@@ -154,46 +177,46 @@ class TodoWidget(QWidget):
             """
             /* 面板背景由 paintEvent 手绘（半透明顶层窗口 QSS 背景不生效） */
             QLabel { background: transparent; border: none; }
-            QLabel#widgetTitle { font-size: 14px; font-weight: bold; color: #F4F6EF; }
-            QLabel#widgetCount { font-size: 11px; color: #D3DCCB; }
-            QLabel#widgetItem { font-size: 12px; color: #F0F4EB; }
-            QLabel#widgetMeta { font-size: 11px; color: #D3DCCB; }
-            QLabel#widgetHint { font-size: 10px; color: #D3DCCB; }
-            QLabel#widgetGroupName { font-size: 12px; font-weight: bold; color: #E2EBD9; }
-            QLabel#widgetGroupArrow { font-size: 9px; color: #D3DCCB; }
-            QLabel#widgetGroupCount { font-size: 10px; color: #D3DCCB; }
+            QLabel#widgetTitle { font-size: 14px; font-weight: bold; color: @title@; @font_title@ }
+            QLabel#widgetCount { font-size: 11px; color: @count@; }
+            QLabel#widgetItem { font-size: 12px; color: @item@; @font_body@ }
+            QLabel#widgetMeta { font-size: 11px; color: @meta@; }
+            QLabel#widgetHint { font-size: 10px; color: @hint@; }
+            QLabel#widgetGroupName { font-size: 12px; font-weight: bold; color: @group@; @font_title@ }
+            QLabel#widgetGroupArrow { font-size: 9px; color: @icon@; }
+            QLabel#widgetGroupCount { font-size: 10px; color: @meta@; }
             GroupHeader { background: transparent; border: 1px solid transparent; border-radius: 6px; }
-            GroupHeader:hover { background: rgba(209, 224, 196, 18); }
-            GroupHeader:focus { background: rgba(209, 224, 196, 24); border-color: #9DB591; }
+            GroupHeader:hover { background: @hover@; }
+            GroupHeader:focus { background: @hover_strong@; border-color: @focus@; }
             QWidget#widgetRow { background: transparent; border-radius: 6px; }
-            QWidget#widgetRow:hover { background: rgba(209, 224, 196, 16); }
+            QWidget#widgetRow:hover { background: @hover@; }
             QPushButton#widgetBtn {
-                border: none; background: transparent; color: #D3DCCB;
+                border: none; background: transparent; color: @icon@;
                 border-radius: 5px; padding: 0;
             }
-            QPushButton#widgetBtn:hover, QPushButton#widgetBtn:focus { background: rgba(209, 224, 196, 35); }
-            QPushButton#widgetBtn:pressed { background: rgba(209, 224, 196, 60); }
+            QPushButton#widgetBtn:hover, QPushButton#widgetBtn:focus { background: @hover_strong@; }
+            QPushButton#widgetBtn:pressed { background: @press@; }
             QPushButton#widgetDone {
-                border: 1.5px solid #BFCFB2;
+                border: 1.5px solid @ring@;
                 border-radius: 9px;
                 background: transparent; color: transparent;
                 font-size: 10px; font-weight: bold; padding: 0;
             }
             QPushButton#widgetDone:hover, QPushButton#widgetDone:focus {
-                border-color: #A7CE99; background: rgba(145, 186, 134, 35);
+                border-color: @ring_hover@; background: @hover_strong@;
             }
             QPushButton#widgetDone[done="true"] {
                 background: @ACCENT@; border-color: @ACCENT@; color: white;
             }
             QPushButton#widgetMore {
                 border: 1px solid transparent; background: transparent;
-                color: @MORE_TEXT@; font-size: 11px; border-radius: 6px;
+                color: @meta@; font-size: 11px; border-radius: 6px;
                 padding: 4px 10px; text-align: left;
             }
             QPushButton#widgetMore:hover, QPushButton#widgetMore:focus {
-                background: @MORE_HOVER@; color: @MORE_HOVER_TEXT@;
+                background: @hover_strong@; color: @item@;
             }
-            QPushButton#widgetMore:pressed { background: @MORE_PRESS@; }
+            QPushButton#widgetMore:pressed { background: @press@; }
             QScrollArea#widgetScroll { background: transparent; border: none; }
             QScrollArea#widgetScroll > QWidget > QWidget { background: transparent; }
             """
@@ -220,15 +243,21 @@ class TodoWidget(QWidget):
         self._move_to_corner()
 
     def _apply_style(self, *_args) -> None:
-        # 挂件始终是深色半透明面板；仅勾选色跟随皮肤强调色（深色皮肤用其深色版本保证白勾对比）
+        # 面板外观随风格（深色亚克力 / 纸条）；勾选色跟随皮肤强调色（深色皮肤用其深色版本保证白勾对比）
         accent = theme.c("accent_press" if theme.is_dark() else "accent")
-        self.setStyleSheet(
-            self._qss.replace("@ACCENT@", accent)
-            .replace("@MORE_TEXT@", theme.c("widget_more_text"))
-            .replace("@MORE_HOVER_TEXT@", theme.c("widget_more_hover_text"))
-            .replace("@MORE_HOVER@", theme.c("widget_more_hover"))
-            .replace("@MORE_PRESS@", theme.c("widget_more_press"))
-        )
+        qss = self._qss.replace("@ACCENT@", accent)
+        for key in ("title", "count", "item", "meta", "hint", "group", "icon", "ring", "ring_hover",
+                    "hover_strong", "hover", "press", "focus", "font_title", "font_body"):
+            qss = qss.replace(f"@{key}@", wcolor(key))
+        self.setStyleSheet(qss)
+        if hasattr(self, "min_btn"):
+            self._sync_header_icons()
+            self.reload()
+        self.update()
+
+    def _sync_header_icons(self) -> None:
+        self.min_btn.setIcon(ui_icon("restore_window" if self._minimized else "minus", wcolor("icon"), 14))
+        self.hide_btn.setIcon(ui_icon("close", wcolor("icon"), 14))
 
     # ---------- 构建 ----------
 
@@ -249,13 +278,13 @@ class TodoWidget(QWidget):
         header.addWidget(self.count_label)
         header.addStretch(1)
         self.min_btn = QPushButton()
-        self.min_btn.setIcon(ui_icon("minus", "#D3DCCB", 14))
+        self.min_btn.setIcon(ui_icon("minus", wcolor("icon"), 14))
         self.min_btn.setObjectName("widgetBtn")
         self.min_btn.setFixedSize(22, 22)
         self.min_btn.setAccessibleName("最小化桌面挂件")
         self.min_btn.setToolTip("最小化为标题栏")
         self.hide_btn = QPushButton()
-        self.hide_btn.setIcon(ui_icon("close", "#D3DCCB", 14))
+        self.hide_btn.setIcon(ui_icon("close", wcolor("icon"), 14))
         self.hide_btn.setAccessibleName("隐藏桌面挂件")
         self.hide_btn.setObjectName("widgetBtn")
         self.hide_btn.setFixedSize(22, 22)
@@ -303,9 +332,7 @@ class TodoWidget(QWidget):
         self._minimized = not self._minimized
         self._set_list_visible(not self._minimized)
         self.hint_label.setVisible(not self._minimized)
-        self.min_btn.setIcon(ui_icon(
-            "restore_window" if self._minimized else "minus", "#D3DCCB", 14
-        ))
+        self._sync_header_icons()
         self.min_btn.setAccessibleName("还原桌面挂件" if self._minimized else "最小化桌面挂件")
         self.min_btn.setToolTip("还原待办列表" if self._minimized else "最小化为标题栏")
         self._resize_timer.stop()
@@ -492,7 +519,7 @@ class TodoWidget(QWidget):
         # 置顶标记
         if memo.is_pinned:
             pin = QLabel()
-            pin.setPixmap(ui_icon("pin", "#E8C997", 12).pixmap(12, 12))
+            pin.setPixmap(ui_icon("pin", wcolor("pin"), 12).pixmap(12, 12))
             pin.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             lay.addWidget(pin, 0, Qt.AlignmentFlag.AlignTop)
 
@@ -571,13 +598,18 @@ class TodoWidget(QWidget):
         """Keep the original background translucency without fading the text."""
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        paper = theme.is_paper()
         path = QPainterPath()
         path.addRoundedRect(
-            QRectF(self.rect()).adjusted(0.5, 0.5, -1.0, -1.0), 16, 16
+            QRectF(self.rect()).adjusted(0.5, 0.5, -1.0, -1.0), 6 if paper else 12, 6 if paper else 12
         )
-        p.fillPath(path, QColor(38, 38, 44, 190))
-        p.setPen(QPen(QColor(222, 232, 216, 60), 1.0))
+        p.fillPath(path, QColor(*wcolor("panel")))
+        p.setPen(QPen(QColor(*wcolor("edge")), 1.0))
         p.drawPath(path)
+        if paper:
+            # 一截和纸胶带，把纸条"贴"在桌面上
+            tape = QRectF(self.width() / 2 - 46, 0, 92, 9)
+            p.fillRect(tape, QColor(199, 167, 124, 150))
         p.end()
 
     def showEvent(self, e):  # noqa: N802

@@ -58,7 +58,7 @@ def main() -> None:
         kernel.CreateMutexW.restype = ctypes.c_void_p
         kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
         app._installer_mutex = kernel.CreateMutexW(None, False, "Local\\LumoInstallerRunning-v1")
-    theme.apply(theme.saved_name())  # 全局样式：按上次选择的皮肤
+    theme.apply(theme.saved_name(), style_key=theme.saved_style())  # 全局样式：按上次选择的风格与皮肤
 
     win = MainWindow()
     controller = Controller(win)  # 托盘 / 全局热键 / 快捷记录 / 桌面挂件

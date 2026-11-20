@@ -1,4 +1,8 @@
-"""PySide6 主界面：导航栏 + 分类侧边栏 + 卡片流 + 回收站。"""
+"""PySide6 主界面：标题栏 + 分类侧栏 + 分组列表 + 详情栏 + 回收站。
+
+两种风格（theme.STYLES）共用同一套控件树：云母 = 三栏、行式列表、详情常驻；
+纸笺 = 日历页侧栏、宋体细线列表、详情选中时展开。差异集中在 QSS 与 paintEvent。
+"""
 from __future__ import annotations
 
 import ctypes
@@ -7,7 +11,7 @@ from datetime import datetime
 from html import escape
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -36,6 +40,7 @@ from . import effects
 from . import nlp_time
 from .category_dialog import CategoryPickerDialog
 from .db import Category, Memo
+from .detail_pane import DetailPane
 from .icons import make_icon, mark_pixmap, ui_icon
 from .settings_dialog import SettingsView
 from .task_dialog import TaskPropsDialog
@@ -69,6 +74,90 @@ def _fmt_advance(minutes: int) -> str:
     if minutes % 60 == 0:
         return f"（提前{minutes // 60}小时提醒）"
     return f"（提前{minutes}分钟提醒）"
+
+
+# 二十四节气的常见日期（公历，逐年会有 ±1 天浮动——文案只说"时节/将至"，不断言当天）
+_TERMS = (
+    (1, 6, "小寒"), (1, 20, "大寒"), (2, 4, "立春"), (2, 19, "雨水"), (3, 6, "惊蛰"), (3, 21, "春分"),
+    (4, 5, "清明"), (4, 20, "谷雨"), (5, 6, "立夏"), (5, 21, "小满"), (6, 6, "芒种"), (6, 21, "夏至"),
+    (7, 7, "小暑"), (7, 23, "大暑"), (8, 8, "立秋"), (8, 23, "处暑"), (9, 8, "白露"), (9, 23, "秋分"),
+    (10, 8, "寒露"), (10, 23, "霜降"), (11, 7, "立冬"), (11, 22, "小雪"), (12, 7, "大雪"), (12, 22, "冬至"),
+)
+
+
+def almanac_line(now: datetime) -> str:
+    """纸笺侧栏的"黄历"小字：干支年 · 节气时节（立春前仍算上一年）。"""
+    year = now.year - (1 if (now.month, now.day) < (2, 4) else 0)
+    ganzhi = "甲乙丙丁戊己庚辛壬癸"[(year - 4) % 10] + "子丑寅卯辰巳午未申酉戌亥"[(year - 4) % 12]
+    md = (now.month, now.day)
+    current = next((t for t in reversed(_TERMS) if (t[0], t[1]) <= md), _TERMS[-1])
+    upcoming = next((t for t in _TERMS if (t[0], t[1]) > md), _TERMS[0])
+    nxt = datetime(now.year + (1 if upcoming is _TERMS[0] and md >= (1, 6) else 0), upcoming[0], upcoming[1])
+    days = (nxt.date() - now.date()).days
+    term = f"{upcoming[2]}将至" if 0 < days <= 2 else f"{current[2]}时节"
+    return f"{ganzhi}年 · {term}"
+
+
+def group_memos(memos: list[Memo], paper: bool, now_ts: int | None = None) -> list[tuple[str, bool, list[Memo]]]:
+    """按风格分组：云母按截止日期（逾期/今天/明天/以后/无期限），纸笺按 置顶/有期限/随记。
+
+    返回 [(标题, 是否警示, 条目)]，空组已剔除；组内保持数据库顺序，有期限的组按截止时间升序。
+    """
+    now = datetime.fromtimestamp(now_ts) if now_ts is not None else datetime.now()
+    today = now.date()
+    if paper:
+        pinned = [m for m in memos if m.is_pinned]
+        dated = sorted((m for m in memos if not m.is_pinned and m.due_ts), key=lambda m: m.due_ts)
+        rest = [m for m in memos if not m.is_pinned and not m.due_ts]
+        groups = [("置顶", False, pinned), ("有期限", False, dated), ("随记", False, rest)]
+    else:
+        buckets: dict[str, list[Memo]] = {k: [] for k in ("overdue", "today", "tomorrow", "later", "none")}
+        for m in memos:
+            if not m.due_ts:
+                buckets["none"].append(m)
+                continue
+            if m.due_ts < now.timestamp() and not m.is_done:
+                buckets["overdue"].append(m)
+                continue
+            delta = (datetime.fromtimestamp(m.due_ts).date() - today).days
+            buckets["today" if delta <= 0 else "tomorrow" if delta == 1 else "later"].append(m)
+        for key in ("overdue", "today", "tomorrow", "later"):
+            buckets[key].sort(key=lambda m: m.due_ts)
+        groups = [("已逾期", True, buckets["overdue"]), ("今天", False, buckets["today"]),
+                  ("明天", False, buckets["tomorrow"]), ("以后", False, buckets["later"]),
+                  ("无期限", False, buckets["none"])]
+    return [g for g in groups if g[2]]
+
+
+class GroupHeaderRow(QWidget):
+    """列表分组标题（不可选中）；纸笺风格在标题后画一条细线。"""
+
+    def __init__(self, title: str, count: int, warn: bool) -> None:
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        paper = theme.is_paper()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6 if paper else 12, 10 if paper else 8, 0, 2)
+        lay.setSpacing(8)
+        self.label = QLabel()
+        self.label.setObjectName("groupHeader")
+        self.label.setProperty("warn", "true" if warn else "false")
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        shown = " ".join(title) if paper else title  # 纸笺：疏排字距
+        self.label.setText(f'{shown}&nbsp;&nbsp;<span style="color:{theme.c("faint")}">{count}</span>')
+        self.label.setAccessibleName(f"{title} {count} 条")
+        lay.addWidget(self.label)
+        lay.addStretch(1)
+
+    def paintEvent(self, e):  # noqa: N802
+        if not theme.is_paper():
+            return
+        p = QPainter(self)
+        x = self.label.geometry().right() + 14
+        y = self.label.geometry().center().y() + 1
+        p.setPen(QPen(theme.qc("line"), 1.0))
+        p.drawLine(QPoint(x, y), QPoint(self.width() - 4, y))
+        p.end()
 
 
 class _NavButton(QToolButton):
@@ -225,6 +314,32 @@ class NameDialog(QDialog):
         return self.edit.text().strip()
 
 
+def cat_marker(cat_id: int, size: int = 16) -> QPixmap:
+    """分类色标：云母为圆角小方块，纸笺为菱形（像书签上的朱印）。"""
+    ratio = 2
+    pm = QPixmap(size * ratio, size * ratio)
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor(theme.cat_color(cat_id))
+    c = size / 2
+    path = QPainterPath()
+    if theme.is_paper():
+        r = size * 0.22
+        path.moveTo(c, c - r)
+        path.lineTo(c + r, c)
+        path.lineTo(c, c + r)
+        path.lineTo(c - r, c)
+        path.closeSubpath()
+    else:
+        r = size * 0.3
+        path.addRoundedRect(QRectF(c - r, c - r, 2 * r, 2 * r), 2.5, 2.5)
+    p.fillPath(path, color)
+    p.end()
+    return pm
+
+
 class CategoryRow(QWidget):
     """侧边栏分类行：点击选中，悬停出现删除。"""
 
@@ -249,7 +364,10 @@ class CategoryRow(QWidget):
         lay.setSpacing(9)
 
         icon = QLabel()
-        icon.setPixmap(ui_icon("notes" if cat_id == 0 else "folder", theme.c("muted"), 16).pixmap(16, 16))
+        icon.setPixmap(
+            ui_icon("notes", theme.c("muted"), 16).pixmap(16, 16) if cat_id == 0
+            else cat_marker(cat_id, 16)
+        )
         icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay.addWidget(icon)
 
@@ -332,9 +450,13 @@ class CategoryRow(QWidget):
 
 
 class MemoItemWidget(QWidget):
-    """单条备忘录的展示控件（卡片样式，内容自动换行、高度自适应）。"""
+    """单条备忘录行（内容自动换行、高度自适应）。
 
-    HEIGHT = 90
+    云母：圆角行，悬停/选中填充，选中左侧强调条；
+    纸笺：无框，点线分隔，选中朱砂竖条；高优先级盖「急」字小印。
+    """
+
+    HEIGHT = 56
     height_changed = Signal(int)
 
     def __init__(self, memo: Memo, win: "MainWindow"):
@@ -360,12 +482,13 @@ class MemoItemWidget(QWidget):
     # ---------- 构建 ----------
 
     def _build(self) -> None:
+        paper = theme.is_paper()
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 15, 14, 15)
-        lay.setSpacing(8)
+        lay.setContentsMargins(*((6, 13, 8, 12) if paper else (14, 10, 10, 10)))
+        lay.setSpacing(5 if paper else 4)
         content_row = QHBoxLayout()
         self.content_row = content_row
-        content_row.setSpacing(12)
+        content_row.setSpacing(14 if paper else 12)
 
         self.done_btn = QPushButton()
         self.done_btn.setObjectName("doneBtn")
@@ -399,7 +522,15 @@ class MemoItemWidget(QWidget):
         self.host_stack.addWidget(self.edit)
         content_row.addWidget(self.host_stack, 1)
 
-        # 删除按钮：常显暖灰，悬停变红
+        # 纸笺：高优先级的「急」字小印
+        self.seal = QLabel("急")
+        self.seal.setObjectName("memoSeal")
+        self.seal.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.seal.setFixedSize(18, 18)
+        self.seal.setToolTip("高优先级")
+        self.seal.setVisible(False)
+
+        # 删除按钮：静止时隐形（不占视觉），悬停行时浮现，悬停按钮变红
         self.del_btn = QPushButton()
         self.del_btn.setObjectName("deleteAction")
         self.del_btn.setFixedSize(28, 28)
@@ -438,43 +569,52 @@ class MemoItemWidget(QWidget):
         effects.hover_icon(self.restore_btn, ui_icon("restore", theme.c("accent"), 16), ui_icon("restore", theme.c("accent_press"), 16))
         self._sync_action_icons(False)
 
-        # 右侧元信息：置顶图钉 + 相对时间 + 分类标签
+        # 元信息一行：任务徽标（截止/优先级/重复）· 分类色点 · 置顶 · 相对时间
         self.meta = QHBoxLayout()
-        self.meta.setContentsMargins(32, 0, 0, 0)
-        self.meta.setSpacing(12)
-        self.pin_label = QLabel("置顶")
-        self.pin_label.setObjectName("memoPin")
-        self.time_label = QLabel()
-        self.time_label.setObjectName("memoTime")
+        self.meta.setContentsMargins(34 if paper else 32, 0, 0, 0)
+        self.meta.setSpacing(12 if paper else 10)
+        self.badges_label = QLabel()
+        self.badges_label.setObjectName("memoBadges")
+        self.badges_label.setTextFormat(Qt.TextFormat.RichText)
         self.tags_label = QLabel()
         self.tags_label.setObjectName("memoTags")
-        self.tags_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.tags_label.setTextFormat(Qt.TextFormat.RichText)
         self.tags_label.setWordWrap(True)
         self.tags_label.setMinimumWidth(0)
         self.tags_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.tags_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.badges_label = QLabel()
-        self.badges_label.setObjectName("memoBadges")
-        self.badges_label.setContentsMargins(32, 0, 0, 0)
-        self.badges_label.setWordWrap(True)
+        self.pin_label = QLabel()
+        self.pin_label.setObjectName("memoPin")
+        self.pin_label.setToolTip("已置顶")
+        self.time_label = QLabel()
+        self.time_label.setObjectName("memoTime")
+        for w in (self.badges_label, self.tags_label, self.pin_label, self.time_label):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.meta.addWidget(self.seal)
+        self.meta.addWidget(self.badges_label)
+        self.meta.addWidget(self.tags_label, 1)
         self.meta.addWidget(self.pin_label)
         self.meta.addWidget(self.time_label)
-        self.meta.addWidget(self.tags_label, 1)
         lay.addLayout(self.meta)
-        lay.addWidget(self.badges_label)
 
     # ---------- 状态 ----------
 
     def set_selected(self, on: bool) -> None:
         if self.property("selected") != on:
             self.setProperty("selected", on)
+            self._sync_action_icons(self.underMouse())
             self.update()
 
     def _sync_action_icons(self, card_hovered: bool) -> None:
-        # 卡片静止时操作图标更轻，悬停卡片时加深，悬停按钮本身再强调
-        idle = theme.c("text_2" if card_hovered else "faint")
-        effects.hover_icon(self.props_btn, ui_icon("sliders", idle, 16), ui_icon("sliders", theme.c("accent"), 16))
-        effects.hover_icon(self.del_btn, ui_icon("trash", idle, 15), ui_icon("trash", theme.c("danger"), 15))
+        # 静止时操作图标隐形（按钮仍占位，悬停时不会让正文重新换行），
+        # 悬停或选中行时浮现，悬停按钮本身再强调
+        shown = card_hovered or bool(self.property("selected")) or self.hasFocus()
+        if shown:
+            idle_props = ui_icon("sliders", theme.c("text_2"), 16)
+            idle_del = ui_icon("trash", theme.c("text_2"), 15)
+        else:
+            idle_props = idle_del = QIcon()
+        effects.hover_icon(self.props_btn, idle_props, ui_icon("sliders", theme.c("accent"), 16))
+        effects.hover_icon(self.del_btn, idle_del, ui_icon("trash", theme.c("danger"), 15))
 
     def _on_done_clicked(self) -> None:
         if not self.memo.is_done:
@@ -487,7 +627,7 @@ class MemoItemWidget(QWidget):
         self.win.toggle_done(self.memo.id)
 
     def _apply_state(self) -> None:
-        # 高优先级卡片淡红底色提示
+        paper = theme.is_paper()
         self.setProperty("prioHigh", "true" if self.memo.priority >= 3 else "false")
         self.setProperty("completed", self.memo.is_done)
         self.style().unpolish(self)
@@ -501,6 +641,8 @@ class MemoItemWidget(QWidget):
         else:
             effects.hover_icon(self.done_btn, QIcon(), ui_icon("check", theme.c("accent"), 14))
         self.done_btn.setIconSize(QSize(14, 14))
+        # 云母：高优先级的完成圈描成橙色（纸笺用「急」字印表达）
+        self.done_btn.setProperty("prio", "true" if self.memo.priority >= 3 and not paper else "false")
         self.done_btn.setAccessibleName("取消完成" if done else "标记完成")
         self.done_btn.setToolTip("取消完成" if done else "标记完成")
         self.done_btn.style().unpolish(self.done_btn)
@@ -515,20 +657,24 @@ class MemoItemWidget(QWidget):
 
         self.content_label.setText(self.full_text)
         self.content_label.setToolTip(self.full_text)
+        self.seal.setVisible(paper and self.memo.priority >= 3 and not done)
+        self.pin_label.setPixmap(ui_icon("star" if not paper else "pin", theme.c("warn"), 13).pixmap(13, 13))
         self.pin_label.setVisible(self.memo.is_pinned)
         self.time_label.setText(rel_time(self.memo.updated_at))
 
-        # 分类标签
+        # 分类：色点 + 名称（与侧栏色标一致）
         cat_ids = self.win._memo_cats.get(self.memo.id, set())
-        names = [self.win._cat_names[c] for c in sorted(cat_ids) if c in self.win._cat_names]
-        self.tags_label.setText(" ".join(f"#{n}" for n in names))
-        self.tags_label.setToolTip(" / ".join(names))
-        self.tags_label.setVisible(bool(names))
+        cats = [(c, self.win._cat_names[c]) for c in sorted(cat_ids) if c in self.win._cat_names]
+        self.tags_label.setText("&nbsp;&nbsp;&nbsp;".join(
+            f'<span style="color:{theme.cat_color(c)}">●</span>&nbsp;{escape(n)}' for c, n in cats
+        ))
+        self.tags_label.setToolTip(" / ".join(n for _c, n in cats))
+        self.tags_label.setVisible(bool(cats))
 
         # 截止/优先级/重复徽标
         self.badges_label.setText(self._badges_html())
         self.badges_label.setVisible(bool(self.badges_label.text()))
-        self.badges_label.setToolTip(self._badges_tooltip())
+        self.setToolTip(self._badges_tooltip())
 
         trash = self.win.trash_mode
         self.done_btn.setVisible(not trash)
@@ -552,12 +698,15 @@ class MemoItemWidget(QWidget):
         alignment = Qt.AlignmentFlag.AlignTop if br.height() > 35 else Qt.AlignmentFlag.AlignVCenter
         for button in (self.done_btn, self.props_btn, self.del_btn, self.restore_btn):
             self.content_row.setAlignment(button, alignment)
-        meta_h = max(self.time_label.sizeHint().height(),
-                     self.tags_label.heightForWidth(max(1, self.tags_label.width())) if self.tags_label.isVisible() else 0)
-        badge_h = 0
-        if not self.badges_label.isHidden():
-            badge_h = self.badges_label.heightForWidth(max(1, self.width() - 32)) + 8
-        h = max(self.HEIGHT, max(br.height(), 28) + meta_h + badge_h + 38)
+        meta_w = max(1, self.width() - 32)
+        meta_h = max(
+            self.time_label.sizeHint().height(),
+            self.badges_label.sizeHint().height() if not self.badges_label.isHidden() else 0,
+            self.tags_label.heightForWidth(max(1, self.tags_label.width() or meta_w // 2))
+            if not self.tags_label.isHidden() else 0,
+        )
+        m = self.layout().contentsMargins()
+        h = max(self.HEIGHT, max(br.height(), 22) + meta_h + self.layout().spacing() + m.top() + m.bottom())
         if abs(h - self.height()) > 1:
             self.setFixedHeight(h)
             self.height_changed.emit(h)
@@ -575,14 +724,14 @@ class MemoItemWidget(QWidget):
             parts.append(
                 f'<span style="color:{color}">{prefix}{nlp_time.format_due(m.due_ts)}</span>'
             )
-        if 0 < m.priority <= 3:
+        if 0 < m.priority <= 3 and not (theme.is_paper() and m.priority == 3):
             pcolor = theme.c({1: "muted", 2: "warn", 3: "overdue"}[m.priority])
             parts.append(
                 f'<span style="color:{pcolor}">{db.PRIORITY_LABELS[m.priority]}优先级</span>'
             )
         if m.recur:
             parts.append(f'<span style="color:{theme.c("muted")}">{escape(db.RECUR_LABELS.get(m.recur, m.recur))}</span>')
-        return " &nbsp; / &nbsp; ".join(parts)
+        return "&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts)
 
     def _badges_tooltip(self) -> str:
         """徽标悬停提示：完整截止时间 + 优先级 + 重复 + 提前量。"""
@@ -604,28 +753,35 @@ class MemoItemWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         h, f = self._hover_t, self._flash_t
         selected = bool(self.property("selected"))
-        card = QRectF(self.rect()).adjusted(1.5, 1.0, -1.5, -3.5)
-        # 底部柔和投影：静止时几乎不可见，悬停时轻微浮起
-        boost = 2.2 if theme.is_dark() else 1.0
-        for dy, rest, lifted in ((3.0, 5, 13), (2.0, 7, 15), (1.0, 9, 17)):
-            shadow = QPainterPath()
-            shadow.addRoundedRect(card.translated(0, dy), 10, 10)
-            p.fillPath(shadow, theme.qc("shadow", round((rest + (lifted - rest) * h) * boost)))
+        r = QRectF(self.rect())
+        if theme.is_paper():
+            # 纸面：无框；悬停/选中淡淡洇开，点线分隔，选中朱砂竖条
+            if selected:
+                p.fillRect(r.adjusted(0, 0, 0, -1), theme.qc("selected"))
+            elif h > 0:
+                p.fillRect(r.adjusted(0, 0, 0, -1), theme.qc("hover", round(150 * h)))
+            if f > 0:
+                p.fillRect(r.adjusted(0, 0, 0, -1), theme.qc("flash", round(230 * f)))
+            p.setPen(QPen(theme.qc("line"), 1.0, Qt.PenStyle.DotLine))
+            p.drawLine(QPoint(0, self.height() - 1), QPoint(self.width(), self.height() - 1))
+            if selected:
+                p.fillRect(QRectF(0, 8, 2.5, r.height() - 17), theme.qc("accent"))
+            p.end()
+            return
+        # 云母：圆角行，静止透明；悬停浅填充，选中强调色淡底 + 左侧强调条
+        card = r.adjusted(2, 1, -2, -1)
         path = QPainterPath()
-        path.addRoundedRect(card, 10, 10)
-        if self.property("completed"):
-            bg = theme.qc("surface_muted")
-        else:
-            bg = theme.qc("selected" if selected else "surface")
-        p.fillPath(path, effects.mix(bg, theme.c("flash"), f * 0.9))
-        if self.property("prioHigh") == "true":
-            p.save()
-            p.setClipPath(path)
-            p.fillRect(QRectF(card.left(), card.top(), 3.5, card.height()), theme.qc("prio"))
-            p.restore()
-        border = theme.qc("focus") if selected else effects.mix(theme.c("border"), theme.c("border_hover"), h)
-        p.setPen(QPen(effects.mix(border, theme.c("flash_border"), f), 1.0))
-        p.drawPath(path)
+        path.addRoundedRect(card, 8, 8)
+        if selected:
+            p.fillPath(path, theme.qc("selected"))
+        elif h > 0:
+            p.fillPath(path, theme.qc("hover", round(255 * h)))
+        if f > 0:
+            p.fillPath(path, theme.qc("flash", round(240 * f)))
+        if selected:
+            bar = QPainterPath()
+            bar.addRoundedRect(QRectF(card.left() + 1, card.center().y() - 9, 3, 18), 1.5, 1.5)
+            p.fillPath(bar, theme.qc("accent"))
         p.end()
 
     def _set_hover_t(self, v: float) -> None:
@@ -741,22 +897,29 @@ class ComposerFrame(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         t = self._focus_t
-        card = QRectF(self.rect()).adjusted(3.5, 3.5, -3.5, -3.5)
-        boost = 2.5 if theme.is_dark() else 1.0
-        for dy, alpha in ((2.0, 6), (1.0, 9)):
-            shadow = QPainterPath()
-            shadow.addRoundedRect(card.translated(0, dy), 12, 12)
-            p.fillPath(shadow, theme.qc("shadow", round(alpha * boost)))
-        if t > 0:
-            ring = QPainterPath()
-            ring.addRoundedRect(card.adjusted(-1.5, -1.5, 1.5, 1.5), 13.5, 13.5)
-            p.setPen(QPen(theme.qc("focus", round(70 * t)), 3.0))
-            p.drawPath(ring)
+        r = QRectF(self.rect())
+        if theme.is_paper():
+            # 纸笺：只有一条墨线，聚焦时转为朱砂并加粗
+            y = r.bottom() - 2.5
+            p.setPen(QPen(effects.mix(theme.c("text_2"), theme.c("accent"), t), 1.2 + 0.6 * t))
+            p.drawLine(QPoint(int(r.left()), int(y)), QPoint(int(r.right()), int(y)))
+            p.end()
+            return
+        # 云母：白底圆角框，聚焦时底边出现 2px 强调色（Fluent 输入框）
+        card = r.adjusted(1.5, 1.5, -1.5, -2.5)
+        shadow = QPainterPath()
+        shadow.addRoundedRect(card.translated(0, 1), 8, 8)
+        p.fillPath(shadow, theme.qc("shadow", 10 if not theme.is_dark() else 30))
         path = QPainterPath()
-        path.addRoundedRect(card, 12, 12)
+        path.addRoundedRect(card, 8, 8)
         p.fillPath(path, theme.qc("surface"))
-        p.setPen(QPen(effects.mix(theme.c("border"), theme.c("focus"), t), 1.0))
+        p.setPen(QPen(effects.mix(theme.c("border"), theme.c("border_hover"), t), 1.0))
         p.drawPath(path)
+        if t > 0:
+            p.save()
+            p.setClipPath(path)
+            p.fillRect(QRectF(card.left(), card.bottom() - 2, card.width(), 2), theme.qc("accent", round(255 * t)))
+            p.restore()
         p.end()
 
 
@@ -798,7 +961,7 @@ class MainWindow(QMainWindow):
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
         )
-        self.resize(1080, 800)
+        self.resize(1160, 800)
         self.setMinimumSize(680, 520)
         app = QApplication.instance()
         effects.install(app)
@@ -842,7 +1005,8 @@ class MainWindow(QMainWindow):
         side_lay.setContentsMargins(12, 18, 12, 10)
         side_lay.setSpacing(4)
 
-        brand = QHBoxLayout()
+        self.brand_box = QWidget()
+        brand = QHBoxLayout(self.brand_box)
         brand.setContentsMargins(8, 0, 0, 0)
         brand.setSpacing(10)
         self.brand_mark = QLabel()
@@ -856,7 +1020,21 @@ class MainWindow(QMainWindow):
         brand_text.addWidget(name)
         brand_text.addWidget(self.brand_sub)
         brand.addLayout(brand_text, 1)
-        side_lay.addLayout(brand)
+        side_lay.addWidget(self.brand_box)
+        # 纸笺：侧栏顶部是一张"日历页"（大号日期 + 星期 + 干支节气）
+        self.paper_head = QWidget()
+        ph = QVBoxLayout(self.paper_head)
+        ph.setContentsMargins(12, 0, 0, 0)
+        ph.setSpacing(2)
+        self.paper_day = QLabel()
+        self.paper_day.setObjectName("paperDay")
+        self.paper_date = QLabel()
+        self.paper_date.setObjectName("paperDate")
+        self.paper_term = QLabel()
+        self.paper_term.setObjectName("paperTerm")
+        for w in (self.paper_day, self.paper_date, self.paper_term):
+            ph.addWidget(w)
+        side_lay.addWidget(self.paper_head)
         side_lay.addSpacing(18)
 
         scroll = QScrollArea()
@@ -928,7 +1106,7 @@ class MainWindow(QMainWindow):
         # ----- 内容区 -----
         content = QWidget()
         self.content = content
-        content.setObjectName("contentPanel")
+        content.setObjectName("listPanel")
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         maincol = QVBoxLayout(content)
         self.content_layout = maincol
@@ -966,6 +1144,7 @@ class MainWindow(QMainWindow):
 
         self.composer = ComposerFrame()
         composer_lay = QVBoxLayout(self.composer)
+        self.composer_lay = composer_lay
         composer_lay.setContentsMargins(19, 13, 15, 13)
         composer_lay.setSpacing(4)
         input_row = QHBoxLayout()
@@ -1089,6 +1268,13 @@ class MainWindow(QMainWindow):
         maincol.addLayout(bottom)
 
         body.addWidget(content, 1)
+
+        # ----- 详情栏 -----
+        self._detail_id: int | None = None
+        self._reloading = False
+        self.detail = DetailPane(self)
+        self.detail.close_requested.connect(self._close_detail)
+        body.addWidget(self.detail)
         self.toast = effects.Toast(content)
         app.installEventFilter(self)
         self._date_timer = QTimer(self)
@@ -1129,10 +1315,31 @@ class MainWindow(QMainWindow):
         self.trash_back_btn.setIcon(ui_icon("back", theme.c("trash_text"), 14))
         self._sync_save_btn(self.input_edit.text())
         self._on_sync_status(self._sync_text)
+        self._apply_style_layout()
         self.composer.update()
         if hasattr(self, "_all_memos"):
             self._sidebar_signature = None
             self.reload()
+
+    def _apply_style_layout(self) -> None:
+        """风格切换时调整结构性差异（页眉、记录框、列表间距、详情栏）。"""
+        paper = theme.is_paper()
+        self.brand_box.setVisible(not paper)
+        self.paper_head.setVisible(paper)
+        self.compose_icon.setVisible(not paper)
+        self.composer_lay.setContentsMargins(*((2, 4, 0, 12) if paper else (19, 13, 15, 13)))
+        self.composer_hint.setContentsMargins(0 if paper else 34, 0, 0, 0)
+        self.composer_hint.setText(
+            "试试  /工作 归类  ·  明天九点 定时  ·  !高 标急" if paper
+            else "Enter 保存  ·  支持「明天9点」设提醒  ·  !高 设优先级"
+        )
+        self.input_edit.setPlaceholderText("此刻，写下一句……" if paper else "此刻，有什么想记下来？")
+        self.list.setSpacing(0 if paper else 1)
+        self.save_btn.setText("记 下" if paper else "记录")
+        self._sync_save_btn(self.input_edit.text())
+        self.detail.retheme()
+        self._update_date()
+        self.resizeEvent(None)
 
 
     # ---------- 分类 ----------
@@ -1163,6 +1370,7 @@ class MainWindow(QMainWindow):
             item = self.side_rows.takeAt(0)
             w = item.widget()
             if w is not None and w is not self.section_header:
+                w.hide()  # 立即从界面消失；真正销毁要等回到事件循环
                 w.deleteLater()
 
         all_row = CategoryRow(0, "所有笔记", len(self._all_memos))
@@ -1235,9 +1443,29 @@ class MainWindow(QMainWindow):
             db.set_memo_categories(memo_id, list(dlg.selected_ids()))
             self.reload()
 
+    def set_task_props(self, memo_id: int, **props) -> None:
+        """详情栏的即时修改：写库后刷新（列表分组/徽标/挂件随之更新）。"""
+        try:
+            db.set_task_props(memo_id, **props)
+        except (sqlite3.Error, ValueError):
+            return
+        self.reload()
+
+    def select_memo(self, memo_id: int) -> None:
+        for item, mid in self.memo_items():
+            if mid == memo_id:
+                self.list.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
+                self.list.setCurrentItem(item)  # 可能触发写库刷新，之后不再使用 item
+                return
+
     def edit_task_props(self, memo_id: int) -> None:
         memo = next((m for m in self._memos if m.id == memo_id), None)
         if memo is None:
+            return
+        if self.width() >= 960 and not self.trash_mode:
+            # 详情栏放得下：选中这条，在右侧直接改（纸笺会随之展开详情栏）
+            self.select_memo(memo_id)
+            self.detail.title.setFocus()
             return
         dlg = TaskPropsDialog(memo, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -1270,11 +1498,18 @@ class MainWindow(QMainWindow):
         now = datetime.now()
         weekday = "一二三四五六日"[now.weekday()]
         self.date_label.setText(f"{now.month}月{now.day}日  星期{weekday}")
+        months = "一二三四五六七八九十"
+        month = months[now.month - 1] if now.month <= 10 else "十" + months[now.month - 11]
+        self.paper_day.setText(str(now.day))
+        self.paper_date.setText(f"{month}月  ·  星期{weekday}")
+        self.paper_term.setText(almanac_line(now))
 
     def resizeEvent(self, e):  # noqa: N802
-        super().resizeEvent(e)
-        if not hasattr(self, "side"):
+        if e is not None:
+            super().resizeEvent(e)
+        if not hasattr(self, "detail"):
             return
+        self._layout_detail()
         compact = self.width() < 880
         self.side.setFixedWidth(188 if compact else 220)
         margin = 22 if compact else 40
@@ -1283,7 +1518,7 @@ class MainWindow(QMainWindow):
         self.page_subtitle.setVisible(not compact)
         self.brand_sub.setVisible(not compact)
         self.side_layout.setContentsMargins(10 if compact else 12, 14 if compact else 18, 10 if compact else 12, 10)
-        self.date_label.setVisible(not compact)
+        self.date_label.setVisible(not compact and not theme.is_paper())
         self.footer_hint.setVisible(not compact)
         self.list_heading.setVisible(not compact)
         self.page_title.setProperty("compact", compact)
@@ -1294,6 +1529,26 @@ class MainWindow(QMainWindow):
                               QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.content_layout.invalidate()
         self._set_page_title(self.page_title.toolTip() or self.page_title.text())
+
+    def _detail_wanted(self) -> bool:
+        # 三栏放不下时（窄窗）详情栏让位，任务属性回到对话框
+        if self.trash_mode or self.width() < 960:
+            return False
+        return self._detail_id is not None if theme.is_paper() else True
+
+    def _layout_detail(self) -> None:
+        self.detail.setVisible(self._detail_wanted())
+
+    def _close_detail(self) -> None:
+        self._detail_id = None
+        self._reloading = True
+        try:
+            self.list.setCurrentItem(None)
+            self.list.clearSelection()
+        finally:
+            self._reloading = False
+        self._sync_selection()
+        self.input_edit.setFocus()
 
     def _set_trash(self, on: bool) -> None:
         self.trash_mode = on
@@ -1307,6 +1562,7 @@ class MainWindow(QMainWindow):
         self.search_edit.blockSignals(False)
         self.trash_bar.setVisible(on)
         self.footer_hint.setText("右键恢复  ·  Delete 彻底删除" if on else "双击编辑  ·  右键更多")
+        self._layout_detail()
         self.reload()
 
     # ---------- 设置整页 ----------
@@ -1409,18 +1665,39 @@ class MainWindow(QMainWindow):
 
         sb = self.list.verticalScrollBar()
         pos = sb.value()
-        self.list.clear()
-        for memo in memos:
-            w = MemoItemWidget(memo, self)
-            w.height_changed.connect(
-                lambda h, mid=memo.id: self._sync_item_height(mid, h)
-            )
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, memo.id)
-            # 宽度不指定（0=跟随视口）；若用文本理想宽度，窄窗口不换行且出横向滚动条
-            item.setSizeHint(QSize(0, MemoItemWidget.HEIGHT))
-            self.list.addItem(item)
-            self.list.setItemWidget(item, w)
+        self._reloading = True  # 重建期间的选中变化不改详情栏绑定
+        try:
+            self.list.clear()
+            groups = [("", False, memos)] if self.trash_mode else group_memos(memos, theme.is_paper())
+            # 只有一个分组时不显示标题（"全部都是无期限"不值得占一行）
+            headers = len(groups) > 1
+            selected_item = None
+            for title, warn, items in groups:
+                if headers:
+                    hdr = QListWidgetItem()
+                    hdr.setFlags(Qt.ItemFlag.NoItemFlags)
+                    hdr.setSizeHint(QSize(0, 40 if theme.is_paper() else 34))
+                    self.list.addItem(hdr)
+                    self.list.setItemWidget(hdr, GroupHeaderRow(title, len(items), warn))
+                for memo in items:
+                    w = MemoItemWidget(memo, self)
+                    w.height_changed.connect(
+                        lambda h, mid=memo.id: self._sync_item_height(mid, h)
+                    )
+                    item = QListWidgetItem()
+                    item.setData(Qt.ItemDataRole.UserRole, memo.id)
+                    # 宽度不指定（0=跟随视口）；若用文本理想宽度，窄窗口不换行且出横向滚动条
+                    item.setSizeHint(QSize(0, MemoItemWidget.HEIGHT))
+                    self.list.addItem(item)
+                    self.list.setItemWidget(item, w)
+                    if memo.id == self._detail_id:
+                        selected_item = item
+            if selected_item is not None:
+                self.list.setCurrentItem(selected_item)
+            else:
+                self._detail_id = None
+        finally:
+            self._reloading = False
         # 首帧布局完成后按实际换行高度校准各条目尺寸
         QTimer.singleShot(0, self._update_item_heights)
         QTimer.singleShot(0, lambda: sb.setValue(min(pos, sb.maximum())))
@@ -1451,6 +1728,19 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.stack.widget(1))
         self._update_status(len(memos))
         self.memos_changed.emit()
+
+    def memo_items(self) -> list[tuple[QListWidgetItem, int]]:
+        """列表里的备忘录条目（跳过分组标题）。"""
+        out = []
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            mid = item.data(Qt.ItemDataRole.UserRole)
+            if mid is not None:
+                out.append((item, int(mid)))
+        return out
+
+    def memo_count(self) -> int:
+        return len(self.memo_items())
 
     def _card(self, memo_id: int) -> MemoItemWidget | None:
         for i in range(self.list.count()):
@@ -1485,11 +1775,19 @@ class MainWindow(QMainWindow):
 
     def _sync_selection(self) -> None:
         current = self.list.currentItem()
+        if not self._reloading:
+            mid = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+            self._detail_id = int(mid) if mid is not None and not self.trash_mode else None
         for i in range(self.list.count()):
             item = self.list.item(i)
             w = self.list.itemWidget(item)
             if isinstance(w, MemoItemWidget):
-                w.set_selected(item is current)
+                w.set_selected(item is current and self._detail_id is not None)
+        memo = next((m for m in self._memos if m.id == self._detail_id), None)
+        if memo is None:
+            self._detail_id = None
+        self.detail.show_memo(memo)
+        self._layout_detail()
 
     def _set_page_title(self, title: str) -> None:
         self.page_title.setToolTip(title)
@@ -1511,7 +1809,8 @@ class MainWindow(QMainWindow):
     def _sync_save_btn(self, text: str) -> None:
         on = bool(text.strip())
         self.save_btn.setEnabled(on)
-        self.save_btn.setIcon(ui_icon("arrow", theme.c("on_accent" if on else "faint"), 14))
+        color = ("accent" if theme.is_paper() else "on_accent") if on else "faint"
+        self.save_btn.setIcon(ui_icon("arrow", theme.c(color), 14))
 
     def _notify(self, text: str, icon: str = "check", action: str | None = None, callback=None) -> None:
         # 挂件/托盘触发的操作不在隐藏的主窗口里弹提示
@@ -1599,7 +1898,10 @@ class MainWindow(QMainWindow):
         item = self.list.currentItem()
         if item is None:
             return
-        memo_id = int(item.data(Qt.ItemDataRole.UserRole))
+        mid = item.data(Qt.ItemDataRole.UserRole)
+        if mid is None:  # 分组标题
+            return
+        memo_id = int(mid)
         if self.trash_mode:
             self.purge_memo(memo_id)
         else:
@@ -1643,7 +1945,7 @@ class MainWindow(QMainWindow):
         self._notify("已恢复到待办", "restore")
         self._remove_card(memo_id)
 
-    def edit_memo(self, memo_id: int, text: str) -> None:
+    def edit_memo(self, memo_id: int, text: str) -> bool:
         # 编辑时同样解析时间/标记；只更新识别到的字段，不清空既有属性
         due_ts, priority, recur, advance, cleaned = nlp_time.parse_task(text)
         if cleaned.strip():
@@ -1661,9 +1963,10 @@ class MainWindow(QMainWindow):
             # 正文+属性单事务、单条同步修订
             db.edit_memo(memo_id, text, props)
         except (ValueError, sqlite3.Error):
-            return
+            return False
         self._flash_id = memo_id
         self.reload()
+        return True
 
     def purge_memo(self, memo_id: int) -> None:
         if memo_id in self._leaving_ids:

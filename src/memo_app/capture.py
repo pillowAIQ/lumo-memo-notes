@@ -18,8 +18,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QListWidget, QLineEdit, QVBoxLayout, QWidget
 
-from . import db, effects, theme
+from html import escape
+
+from . import db, effects, nlp_time, theme
 from .icons import ui_icon
+
+DEFAULT_HINT = "/ 分类  ·  自然语言设提醒                       Enter 保存  /  Esc 关闭"
 
 # 面板四周留给手绘投影的透明边距
 SHADOW = 14
@@ -52,15 +56,18 @@ class QuickCapture(QWidget):
         self.edit.setAccessibleName("快捷记录内容")
         self.edit.setToolTip("/分类名 归类 · 明天9点 设截止 · !高 @每周 提前30分钟")
         self.edit.textChanged.connect(self._refresh_popup)
+        self.edit.textChanged.connect(self._refresh_hint)
         self.edit.installEventFilter(self)
         row.addWidget(self.edit, 1)
-        key = QLabel("Enter")
-        key.setObjectName("enterKey")
-        row.addWidget(key, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.key = QLabel("Enter")
+        self.key.setObjectName("enterKey")
+        row.addWidget(self.key, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(row, 1)
-        hint = QLabel("/ 分类  ·  自然语言设提醒                       Enter 保存  /  Esc 关闭")
-        hint.setContentsMargins(38, 0, 0, 0)
-        lay.addWidget(hint)
+        # 提示行：输入时实时显示识别出的分类 / 截止 / 优先级 / 重复，回车前就知道会存成什么
+        self.hint = QLabel(DEFAULT_HINT)
+        self.hint.setTextFormat(Qt.TextFormat.RichText)
+        self.hint.setContentsMargins(38, 0, 0, 0)
+        lay.addWidget(self.hint)
         self.edit.returnPressed.connect(self._submit)
 
         # 分类补全弹窗（独立顶层窗口，不能作为子控件否则被 68px 高度裁剪）
@@ -80,8 +87,11 @@ class QuickCapture(QWidget):
     def _apply_style(self, *_args) -> None:
         # 面板背景由 paintEvent 手绘（半透明顶层窗口 QSS 背景不生效）
         t = theme.palette()
+        paper = theme.is_paper()
+        spec = theme.STYLES[theme.style_name()]
         self.setStyleSheet(
-            f"QLineEdit {{ border: none; background: transparent; font-size: 16px; padding: 0; color: {t['text']};"
+            f"QLineEdit {{ border: none; background: transparent; font-size: {18 if paper else 16}px; padding: 0;"
+            f" color: {t['text']}; font-family: {spec['font_hint']};"
             f" selection-background-color: {t['accent_soft']}; selection-color: {t['text']}; }}"
             f"QLabel {{ background: transparent; border: none; color: {t['muted']}; font-size: 11px; }}"
             f"QLabel#enterKey {{ background: {t['accent_soft']}; border-radius: 5px; padding: 5px 9px;"
@@ -95,7 +105,38 @@ class QuickCapture(QWidget):
             f"QListWidget::item:selected {{ background: {t['accent_soft']}; color: {t['accent_text']}; }}"
         )
         self.icon.setPixmap(ui_icon("note", t["accent"], 24).pixmap(24, 24))
+        self.icon.setVisible(not paper)
+        self.hint.setContentsMargins(0 if paper else 38, 0, 0, 0)
+        self.key.setText("Enter 记下" if paper else "Enter")
+        self._refresh_hint()
         self.update()
+
+    def _refresh_hint(self, *_args) -> None:
+        """把正在输入的内容按保存时同样的规则解析，提示行实时显示结果。"""
+        text = self.edit.text().strip()
+        parts = []
+        m = re.match(r"^/(\S+)(?:\s+(.+))?$", text)
+        if m and "/" not in m.group(1):
+            parts.append(f"分类 {escape(m.group(1))}")
+            text = (m.group(2) or "").strip()
+        if text:
+            due_ts, priority, recur, advance, _cleaned = nlp_time.parse_task(text)
+            if due_ts:
+                parts.append(f"截止 {nlp_time.format_due(due_ts)}")
+                if advance:
+                    parts.append(f"提前 {advance} 分钟提醒")
+            if priority:
+                parts.append(f"{db.PRIORITY_LABELS.get(priority, '')}优先级")
+            if recur:
+                parts.append(db.RECUR_LABELS.get(recur, recur))
+        if parts:
+            accent = theme.c("accent")
+            self.hint.setText(
+                f'<span style="color:{accent}">已识别</span>&nbsp;&nbsp;'
+                + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(f'<span style="color:{theme.c("text_2")}">{x}</span>' for x in parts)
+            )
+        else:
+            self.hint.setText(escape(DEFAULT_HINT).replace(" ", "&nbsp;"))
 
     # ---------- 绘制 ----------
 
@@ -103,16 +144,26 @@ class QuickCapture(QWidget):
         """手绘圆角浅色面板 + 向下偏移的柔和投影。"""
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        paper = theme.is_paper()
+        radius = 6 if paper else 14
         panel = QRectF(self.rect()).adjusted(SHADOW + 0.5, SHADOW + 0.5, -SHADOW - 0.5, -SHADOW - 0.5)
         for i in range(SHADOW, 0, -1):
             shadow = QPainterPath()
-            shadow.addRoundedRect(panel.translated(0, 4).adjusted(-i, -i, i, i), 16 + i, 16 + i)
+            shadow.addRoundedRect(panel.translated(0, 4).adjusted(-i, -i, i, i), radius + i, radius + i)
             p.fillPath(shadow, theme.qc("shadow", round((1 + 7 * (1 - i / SHADOW) ** 2) * (2 if theme.is_dark() else 1))))
         path = QPainterPath()
-        path.addRoundedRect(panel, 16, 16)
+        path.addRoundedRect(panel, radius, radius)
         p.fillPath(path, theme.qc("surface", 252))
         p.setPen(QPen(theme.qc("border_hover"), 1.0))
         p.drawPath(path)
+        # 输入行下方的分隔：纸笺一条墨线，云母一条强调色细线
+        y = self.edit.geometry().bottom() + 8
+        if paper:
+            p.setPen(QPen(theme.qc("text_2"), 1.2))
+            p.drawLine(int(panel.left() + 20), y, int(panel.right() - 20), y)
+        else:
+            p.setPen(QPen(theme.qc("line"), 1.0))
+            p.drawLine(int(panel.left() + 16), y, int(panel.right() - 16), y)
         p.end()
 
     # ---------- 显示 / 隐藏 ----------

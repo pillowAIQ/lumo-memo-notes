@@ -44,6 +44,13 @@ _PATHS = {
     "toggle": '<rect x="2.5" y="7" width="19" height="10" rx="5"/><circle cx="16.5" cy="12" r="2.5"/>',
     "cloud": '<path d="M7 18.5a4.5 4.5 0 1 1 .9-8.9 6 6 0 0 1 11.3 1.4 3.8 3.8 0 0 1-.7 7.5Z"/>',
     "widget": '<rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M8 9h8M8 13h5"/>',
+    "calendar": '<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+    "bell": '<path d="M6 16v-5a6 6 0 1 1 12 0v5l1.5 2h-15Z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+    "repeat": '<path d="m17 3 3 3-3 3"/><path d="M4 11V9a3 3 0 0 1 3-3h13"/><path d="m7 21-3-3 3-3"/><path d="M20 13v2a3 3 0 0 1-3 3H4"/>',
+    "flag": '<path d="M5 21V4h11l-2 4 2 4H5"/>',
+    "star": '<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9Z"/>',
+    "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    "panel": '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16"/>',
 }
 
 

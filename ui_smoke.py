@@ -259,14 +259,62 @@ def check_ui(app: QApplication) -> None:
     win = MainWindow()
     win.show()
     settle()
-    assert win.list.count() == 6
+    assert win.memo_count() == 6
     shot(win, "01_main")
     for skin in ("ink", "lavender"):
         theme.apply(skin)
         settle()
-        assert win.list.count() == 6
+        assert win.memo_count() == 6
         shot(win, f"01_main_{skin}")
-    theme.apply("pine")
+    # 两种风格：结构差异（页眉 / 分组 / 详情栏显隐）+ 详情栏即时编辑
+    for style_key in ("paper", "mica"):
+        theme.apply_style(style_key, persist=False)
+        settle()
+        assert win.memo_count() == 6
+        assert win.paper_head.isVisible() == (style_key == "paper")
+        assert win.brand_box.isVisible() == (style_key == "mica")
+        headers = [win.list.itemWidget(win.list.item(i)) for i in range(win.list.count())
+                   if win.list.item(i).data(Qt.ItemDataRole.UserRole) is None]
+        assert len(headers) >= 2  # 有期限 / 无期限（或置顶 / 随记）分组
+        assert all(not (win.list.item(i).flags() & Qt.ItemFlag.ItemIsSelectable)
+                   for i in range(win.list.count()) if win.list.item(i).data(Qt.ItemDataRole.UserRole) is None)
+        # 纸笺未选中时安静两栏，云母详情栏常驻（空状态）
+        assert win.detail.isVisible() == (style_key == "mica")
+        shot(win, f"01_main_style_{style_key}")
+        win.select_memo(task)
+        settle()
+        assert win.detail.isVisible() and win.detail.memo.id == task
+        shot(win, f"01_main_style_{style_key}_detail")
+        win._close_detail()
+        settle()
+        assert win.detail.isVisible() == (style_key == "mica") and win.detail.memo is None
+    win.select_memo(task)
+    settle()
+    win.detail.prio_group.button(2).click()
+    settle()
+    assert db.get_memo(task).priority == 2 and win.detail.memo.priority == 2
+    win.detail.prio_group.button(3).click()
+    win.detail.title.setFocus()
+    win.detail.title.setPlainText("和设计团队同步产品方案，准备好讨论要点！")
+    QTest.keyClick(win.detail.title, Qt.Key.Key_Return)
+    settle()
+    assert db.get_memo(task).content.endswith("要点！") and db.get_memo(task).priority == 3
+    assert win.detail.memo.id == task  # 刷新后仍选中同一条
+    win.detail.title.setPlainText("和设计团队同步产品方案，准备好讨论要点。")
+    QTest.keyClick(win.detail.title, Qt.Key.Key_Return)
+    settle()
+    # 截止时间防抖期间立刻切走：修改必须写回原条目，不能丢、不能写到新选中的条目
+    other = next(mid for _item, mid in win.memo_items() if mid != task)
+    other_due = db.get_memo(other).due_ts
+    win.detail.due_edit.setDateTime(win.detail.due_edit.dateTime().addSecs(2 * 3600))
+    assert win.detail._due_timer.isActive()
+    win.select_memo(other)
+    settle()
+    assert db.get_memo(task).due_ts == due - due % 60 + 2 * 3600  # 详情栏按分钟取整
+    assert db.get_memo(other).due_ts == other_due
+    db.set_task_props(task, due_ts=due)
+    win._close_detail()
+    theme.apply("pine", style_key="mica")
     settle()
     win.input_edit.setFocus()
     win.input_edit.setText("让重要的想法，有一个安静的归处。")
@@ -279,6 +327,7 @@ def check_ui(app: QApplication) -> None:
     assert win.list.horizontalScrollBar().maximum() == 0
     assert win.list.mapTo(win, QPoint(0, 0)).y() < 260
     assert not win.brand_sub.isVisible() and not win.date_label.isVisible()
+    assert not win.detail.isVisible()  # 窄窗：三栏放不下，详情栏让位
     for i in range(win.side_rows.count()):
         row = win.side_rows.itemAt(i).widget()
         if isinstance(row, CategoryRow):
@@ -302,7 +351,7 @@ def check_ui(app: QApplication) -> None:
     assert win.search_edit.hasFocus()
     win.search_edit.setText("100%_done")
     settle()
-    assert win.list.count() == 1
+    assert win.memo_count() == 1
     old_sidebar_row = win.side_rows.itemAt(0).widget()
     win.search_edit.setText("100%")
     settle()
@@ -310,17 +359,17 @@ def check_ui(app: QApplication) -> None:
     shot(win, "03_search")
     QTest.keyClick(win.search_edit, Qt.Key.Key_Escape)
     settle()
-    assert not win.search_edit.text() and win.list.count() == 7
+    assert not win.search_edit.text() and win.memo_count() == 7
     win.filter_buttons.buttons()[2].click()
     settle()
-    assert win.list.count() == 1 and win._memos[0].due_ts is not None
+    assert win.memo_count() == 1 and win._memos[0].due_ts is not None
     win.filter_buttons.buttons()[1].click()
     settle()
-    assert win.list.count() == 1 and win._memos[0].is_pinned
+    assert win.memo_count() == 1 and win._memos[0].is_pinned
     win.filter_buttons.buttons()[0].click()
     win._on_cat_select(cats[0])
     settle()
-    assert win.list.count() == 3
+    assert win.memo_count() == 3
     win.input_edit.setText("这个分类里的新想法")
     win.save_btn.click()
     settle()
@@ -480,7 +529,14 @@ def check_ui(app: QApplication) -> None:
         shot(win, "11_settings_sync_ink")
         win.open_settings("appearance")
         shot(win, "11_settings_appearance_ink")
-        theme.apply("pine")
+        paper_card = next(c for c in win.settings_view.pages["appearance"].style_cards.buttons() if c.key == "paper")
+        with patch.object(theme, "apply_style", lambda k, persist=True: theme.apply(
+                theme.STYLES[k]["palette"], style_key=k)):
+            paper_card.click()  # 风格卡：切风格并换上它的推荐配色（隔离：不写 QSettings）
+        settle()
+        assert theme.style_name() == "paper" and theme.current_name() == "paper"
+        shot(win, "11_settings_appearance_paper")
+        theme.apply("pine", style_key="mica")
         QTest.keyClick(win.settings_view, Qt.Key.Key_Escape)
         settle()
         assert win.settings_view is None and win.body_stack.currentIndex() == 0
@@ -549,7 +605,8 @@ def main() -> None:
     app = QApplication([])
     app.setStyle("Fusion")
     # Qt's Windows offscreen plugin does not discover system fonts itself.
-    for filename in ("msyh.ttc", "msyhbd.ttc", "georgia.ttf"):
+    for filename in ("msyh.ttc", "msyhbd.ttc", "georgia.ttf", "SegUIVar.ttf", "segoeui.ttf",
+                     "NotoSerifSC-VF.ttf", "STSONG.TTF", "STKAITI.TTF", "simkai.ttf"):
         font = Path("C:/Windows/Fonts") / filename
         if font.exists():
             QFontDatabase.addApplicationFont(str(font))

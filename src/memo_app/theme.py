@@ -84,8 +84,93 @@ LAVENDER = {
     "widget_more_hover": "rgba(209, 224, 196, 35)", "widget_more_press": "rgba(209, 224, 196, 60)",
 }
 
-PALETTES = {"pine": PINE, "ink": INK, "lavender": LAVENDER}
-DEFAULT = "pine"
+MICA = {
+    "label": "云母蓝", "dark": False,
+    "bg": "#F3F5F9", "side": "#EDF1F6", "titlebar": "#EDF1F6",
+    "content_a": "#F9FAFC", "content_b": "#F6F8FB",
+    "surface": "#FFFFFF", "surface_alt": "#EBEFF5", "surface_muted": "#F2F4F8", "selected": "#E6EEFD",
+    "border": "#E0E5ED", "border_hover": "#C4CEDC", "line": "#E3E7EE",
+    "text": "#1B2430", "text_2": "#3A4656", "muted": "#647184", "faint": "#8995A7",
+    "accent": "#2F6FEB", "accent_hover": "#3E7CF0", "accent_press": "#2459C4",
+    "accent_border": "#2A63D6", "on_accent": "#FFFFFF",
+    "accent_soft": "#E3ECFD", "hover": "#E7EBF2", "press": "#DBE2EC",
+    "accent_text": "#1A4FB8", "focus": "#5B8DEF",
+    "danger": "#C8452F", "danger_soft": "#FBE8E4", "danger_text": "#B23B27",
+    "warn": "#B9590B", "warn_soft": "#FDF0E3", "prio": "#E0661F", "overdue": "#D9480F",
+    "tag": "#4467A8", "flash": "#E4EDFD", "flash_border": "#7FA3EE", "shadow": "#1B2A44",
+    "trash_bg": "#F7EFE6", "trash_border": "#EADBC8", "trash_text": "#7A5E3E", "trash_hover": "#EFE2D1",
+    "toast_bg": "#1F2A3A", "toast_border": "#152031", "toast_text": "#F2F5FA", "toast_accent": "#9DBBFF",
+    "scroll": "#CDD5E1", "scroll_hover": "#A3B0C3",
+    "widget_more_text": "#D3DCCB", "widget_more_hover_text": "#E2EBD9",
+    "widget_more_hover": "rgba(209, 224, 196, 35)", "widget_more_press": "rgba(209, 224, 196, 60)",
+}
+
+PAPER = {
+    "label": "宣纸", "dark": False,
+    "bg": "#F5F0E6", "side": "#F0EADE", "titlebar": "#F0EADE",
+    "content_a": "#F7F2E9", "content_b": "#F4EEE3",
+    "surface": "#FBF8F1", "surface_alt": "#EBE3D4", "surface_muted": "#F1EBDF", "selected": "#F2E8D9",
+    "border": "#E1D7C5", "border_hover": "#CABAA1", "line": "#DDD2BF",
+    "text": "#2A2521", "text_2": "#4E453D", "muted": "#83786B", "faint": "#A29788",
+    "accent": "#B4412E", "accent_hover": "#C04E3A", "accent_press": "#963424",
+    "accent_border": "#9E3828", "on_accent": "#FFF8F0",
+    "accent_soft": "#F1DDD3", "hover": "#ECE4D6", "press": "#E3D8C5",
+    "accent_text": "#9A3626", "focus": "#C9735F",
+    "danger": "#B4412E", "danger_soft": "#F4E0D8", "danger_text": "#9A3626",
+    "warn": "#9A6A2E", "warn_soft": "#F3E8D6", "prio": "#B4412E", "overdue": "#B4412E",
+    "tag": "#6B5E50", "flash": "#F2E6D3", "flash_border": "#C9A27E", "shadow": "#3A2E22",
+    "trash_bg": "#EFE6D6", "trash_border": "#E0D2BA", "trash_text": "#6E5A40", "trash_hover": "#E6DAC6",
+    "toast_bg": "#2A2521", "toast_border": "#1E1A17", "toast_text": "#F5F0E6", "toast_accent": "#F0B9A8",
+    "scroll": "#D8CDBB", "scroll_hover": "#B9AA92",
+    "widget_more_text": "#D3DCCB", "widget_more_hover_text": "#E2EBD9",
+    "widget_more_hover": "rgba(209, 224, 196, 35)", "widget_more_press": "rgba(209, 224, 196, 60)",
+}
+
+# 分类标记色（按分类 id 轮转）：同一分类在侧栏/列表/详情里颜色一致
+for _pal, _cats in (
+    (PINE, ("#2F6B45", "#B5562A", "#5B47B5", "#2F6FA8", "#A8781F", "#8A4A78")),
+    (INK, ("#7FA8FF", "#F2A65A", "#B49CFF", "#5FD3B5", "#F28BB0", "#B8CC6A")),
+    (LAVENDER, ("#6B55C8", "#C0718A", "#2F8F86", "#B07A2A", "#4A6FC8", "#8A5A9E")),
+    (MICA, ("#2F6FEB", "#E07B12", "#8B5CF6", "#16A085", "#D6457A", "#6B7F2A")),
+    (PAPER, ("#3F6B4F", "#B4412E", "#5B4A9E", "#9A6A2E", "#2F5F86", "#7A4A6B")),
+):
+    _pal["cat_colors"] = _cats
+
+PALETTES = {"mica": MICA, "paper": PAPER, "pine": PINE, "ink": INK, "lavender": LAVENDER}
+DEFAULT = "mica"
+
+# ---------- 风格：布局 / 字体 / 列表画法，与配色正交（可任意组合） ----------
+# font_* 是 QSS font-family 回退链：Qt 按字符逐个回退，西文与中文各取最合适的字体。
+_SANS = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif'
+_SEGOE = '"Segoe UI Variable Text", "Segoe UI", ' + _SANS
+_SERIF_DISPLAY = ('"Noto Serif SC", "Source Han Serif SC", "Source Han Serif CN", '
+                  '"STSong", "SimSun", serif')
+# 正文没有好宋体时退回雅黑：SimSun 在正文字号用点阵字形，观感粗糙
+_SERIF_BODY = ('"Noto Serif SC", "Source Han Serif SC", "Source Han Serif CN", '
+               '"STSong", "Microsoft YaHei UI", serif')
+_KAI = '"STKaiti", "KaiTi", "Kaiti SC", ' + _SERIF_BODY
+
+STYLES = {
+    "mica": {
+        "label": "云母", "palette": "mica",
+        "desc": "三栏 · 详情常驻 · 按日期分组",
+        "font_ui": _SEGOE,
+        "font_title": '"Segoe UI Variable Display", "Segoe UI", ' + _SANS,
+        "font_body": _SEGOE,
+        "font_hint": _SEGOE,
+        "radius": "8px", "radius_sm": "6px",
+    },
+    "paper": {
+        "label": "纸笺", "palette": "paper",
+        "desc": "宋体留白 · 细线分隔 · 详情按需展开",
+        "font_ui": _SANS,
+        "font_title": _SERIF_DISPLAY,
+        "font_body": _SERIF_BODY,
+        "font_hint": _KAI,
+        "radius": "4px", "radius_sm": "3px",
+    },
+}
+DEFAULT_STYLE = "mica"
 
 
 class _Notifier(QObject):
@@ -94,10 +179,30 @@ class _Notifier(QObject):
 
 notifier = _Notifier()
 _current = DEFAULT
+_style = DEFAULT_STYLE
 
 
 def current_name() -> str:
     return _current
+
+
+def style_name() -> str:
+    return _style
+
+
+def is_paper() -> bool:
+    return _style == "paper"
+
+
+def saved_style() -> str:
+    name = str(QSettings().value("ui_style", DEFAULT_STYLE))
+    return name if name in STYLES else DEFAULT_STYLE
+
+
+def cat_color(cat_id: int) -> str:
+    """分类标记色（按 id 轮转当前配色的分类色）。"""
+    colors = palette()["cat_colors"]
+    return colors[(max(1, cat_id) - 1) % len(colors)]
 
 
 def palette(name: str | None = None) -> dict:
@@ -121,7 +226,11 @@ def is_dark() -> bool:
 
 
 def saved_name() -> str:
-    name = str(QSettings().value("theme", DEFAULT))
+    value = QSettings().value("theme")
+    if value is None:
+        # 首次运行：配色跟随风格的推荐配色
+        return STYLES[saved_style()]["palette"]
+    name = str(value)
     return name if name in PALETTES else DEFAULT
 
 
@@ -139,7 +248,7 @@ def _chevron(color: str) -> str:
 
 
 _TEMPLATE = Template("""
-QWidget { color: $text; }
+QWidget { color: $text; font-family: $font_ui; }
 QWidget#central { background: $bg; }
 QLabel { background: transparent; border: none; }
 QWidget#titleBar { background: $titlebar; border-bottom: 1px solid $line; }
@@ -192,10 +301,10 @@ QWidget#catRow[selected="true"] QLabel#catCount { background: $surface; color: $
 QPushButton#catDel { border: none; background: transparent; padding: 0; border-radius: 4px; }
 QPushButton#catDel:hover { background: $danger_soft; }
 
-QWidget#contentPanel {
+QWidget#listPanel {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 $content_a, stop:1 $content_b);
 }
-QLabel#pageTitle { color: $text; font-size: 24px; font-weight: 700; }
+QLabel#pageTitle { color: $text; font-size: 24px; font-weight: 700; font-family: $font_title; }
 QLabel#pageTitle[compact="true"] { font-size: 21px; }
 QLabel#pageCount {
     color: $accent_text; background: $accent_soft; font-size: 12px; font-weight: 600;
@@ -254,12 +363,10 @@ QPushButton#filterBtn:checked {
 QPushButton#filterBtn:focus { border-color: $focus; }
 QLabel#listHeading { font-size: 11px; color: $muted; }
 
-QLabel#memoContent { font-size: 14px; color: $text; }
+QLabel#memoContent { font-size: 14px; color: $text; font-family: $font_body; }
 QLabel#memoContent[completed="true"] { color: $muted; }
 QLabel#memoTime { font-size: 11px; color: $muted; }
-QLabel#memoPin {
-    font-size: 11px; color: $warn; background: $warn_soft; border-radius: 4px; padding: 0 6px;
-}
+QLabel#memoPin { background: transparent; padding: 0; }
 QLabel#memoTags { font-size: 11px; color: $tag; }
 QLabel#memoBadges { font-size: 11px; }
 QPushButton#cardAction, QPushButton#deleteAction {
@@ -275,6 +382,25 @@ QPushButton#doneBtn {
 }
 QPushButton#doneBtn:hover, QPushButton#doneBtn:focus { border-color: $accent; background: $accent_soft; }
 QPushButton#doneBtn[done="true"] { background: $accent; border-color: $accent; }
+QPushButton#doneBtn[prio="true"] { border-color: $prio; }
+QLabel#groupHeader { font-size: 12px; color: $text_2; }
+QPlainTextEdit#detailTitle {
+    background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0 2px;
+    font-family: $font_body; font-size: 17px; font-weight: 600; color: $text;
+    selection-background-color: $accent_soft; selection-color: $text;
+}
+QPlainTextEdit#detailTitle:hover { border-color: $line; }
+QPlainTextEdit#detailTitle:focus { border-color: $focus; background: $surface; }
+QLabel#detailCrumb, QLabel#detailCats { font-size: 12px; color: $text_2; }
+QPushButton#chipGhost, QPushButton#chipDanger {
+    border: 1px dashed $border_hover; border-radius: $radius_sm; padding: 5px 10px;
+    background: transparent; color: $muted; font-size: 12px;
+}
+QPushButton#chipGhost:hover { border-style: solid; color: $accent_text; background: $hover; }
+QPushButton#chipGhost:checked { border: 1px solid $warn; color: $warn; background: $warn_soft; }
+QPushButton#chipDanger { border-style: solid; border-color: $line; }
+QPushButton#chipDanger:hover { color: $danger_text; border-color: $danger; background: $danger_soft; }
+QDateTimeEdit[overdue="true"] { color: $overdue; }
 QLineEdit#inlineEdit { background: $selected; padding: 4px 8px; border-color: $focus; }
 
 QListWidget, QScrollArea { background: transparent; border: none; outline: none; }
@@ -384,30 +510,102 @@ QLabel#aboutName { font-size: 26px; font-weight: 700; color: $text; }
 """)
 
 
-def build_qss(name: str | None = None) -> str:
+def build_qss(name: str | None = None, style_key: str | None = None) -> str:
+    style_key = style_key if style_key in STYLES else _style
     pal = dict(palette(name))
+    pal.update({k: v for k, v in STYLES[style_key].items() if k.startswith(("font_", "radius"))})
     pal["chevron"] = _chevron(pal["muted"])
     pal["check"] = _CHECK
-    return _TEMPLATE.substitute(pal)
+    extra = _PAPER_QSS if style_key == "paper" else _MICA_QSS
+    return _TEMPLATE.substitute(pal) + Template(extra).substitute(pal)
 
 
-def apply(name: str | None = None, persist: bool = False) -> None:
-    """Activate a skin app-wide (stylesheet + painted widgets via ``notifier``)."""
+def apply(name: str | None = None, persist: bool = False, style_key: str | None = None) -> None:
+    """Activate a skin (and optionally a style) app-wide.
+
+    ``style_key=None`` keeps the current style. The stylesheet is rebuilt once;
+    custom-painted widgets refresh via ``notifier``.
+    """
     from PySide6.QtWidgets import QApplication
 
-    global _current
+    global _current, _style
     name = name if name in PALETTES else saved_name()
-    changed = name != _current
-    _current = name
+    if style_key not in STYLES:
+        style_key = _style
+    changed = name != _current or style_key != _style
+    _current, _style = name, style_key
     app = QApplication.instance()
     if app is not None:
-        app.setStyleSheet(build_qss(name))
+        app.setStyleSheet(build_qss(name, style_key))
     if persist:
         QSettings().setValue("theme", name)
+        QSettings().setValue("ui_style", style_key)
     if changed:
         notifier.changed.emit(name)
 
 
+def apply_style(style_key: str, persist: bool = True) -> None:
+    """切换风格并换成该风格的推荐配色（之后仍可单独改配色）。"""
+    if style_key in STYLES:
+        apply(STYLES[style_key]["palette"], persist=persist, style_key=style_key)
+
+
+# 风格专属补充规则：追加在通用模板之后，同优先级时后者生效
+_MICA_QSS = """
+QWidget#sidePanel { background: $side; border-right: none; }
+QWidget#listPanel { background: $content_a; border-top: 1px solid $line; border-left: 1px solid $line;
+    border-top-left-radius: 10px; }
+QWidget#detailPanel { background: $surface; border-top: 1px solid $line; border-left: 1px solid $line; }
+QWidget#catRow { border-radius: $radius_sm; }
+QWidget#catRow[selected="true"] { background: $surface; }
+QWidget#catRow[selected="true"] QLabel#catName { color: $text; }
+QLabel#pageTitle { font-size: 22px; font-weight: 600; }
+QLabel#groupHeader { font-size: 12px; font-weight: 600; color: $text_2; }
+QLabel#groupHeader[warn="true"] { color: $overdue; }
+"""
+
+_PAPER_QSS = """
+QWidget#titleBar { border-bottom: none; }
+QLabel#tbTitle { font-family: $font_title; font-weight: 600; color: $text_2; }
+QWidget#sidePanel { background: $side; border-right: 1px solid $line; }
+QWidget#listPanel { background: transparent; }
+QWidget#detailPanel { background: $surface; border-left: 1px solid $line; }
+QLabel#brandName, QLabel#dialogTitle, QLabel#settingsTitle, QLabel#settingsHeading,
+QLabel#emptyTitle, QPlainTextEdit#detailTitle { font-family: $font_title; }
+QLabel#paperDay { font-family: $font_title; font-size: 60px; font-weight: 300; color: $text; }
+QLabel#paperDate { font-family: $font_title; font-size: 13px; color: $text_2; }
+QLabel#paperTerm { font-family: $font_hint; font-size: 12px; color: $accent; }
+QWidget#catRow { border-radius: 0; }
+QWidget#catRow:hover { background: transparent; }
+QWidget#catRow:hover QLabel#catName { color: $text; }
+QWidget#catRow[selected="true"] { background: transparent; }
+QWidget#catRow[selected="true"] QLabel#catName { color: $text; font-weight: 700; }
+QWidget#catRow[selected="true"] QLabel#catCount { background: transparent; color: $accent; }
+QLabel#catName { font-family: $font_body; font-size: 14px; }
+QLabel#catCount { font-family: $font_title; }
+QLabel#sectionLabel { font-family: $font_title; font-weight: 400; }
+QLabel#pageTitle { font-size: 28px; font-weight: 600; }
+QLabel#pageSubtitle, QLabel#composerHint { font-family: $font_hint; font-size: 12px; }
+QLineEdit#mainInput { font-family: $font_hint; font-size: 18px; }
+QLabel#groupHeader { font-family: $font_title; font-size: 12px; color: $accent; }
+QLabel#memoContent { font-size: 15px; }
+QLabel#memoTime, QLabel#memoTags, QLabel#memoBadges { font-family: $font_title; }
+QLabel#memoSeal { font-family: $font_hint; font-size: 12px; color: $accent;
+    border: 1px solid $accent; border-radius: 3px; padding: 0; }
+QPushButton#doneBtn { border: 1.3px solid $text_2; background: transparent; }
+QPushButton#doneBtn[done="true"] { background: $text_2; border-color: $text_2; }
+QWidget#filterGroup { background: transparent; border-radius: 0; }
+QPushButton#filterBtn { font-family: $font_title; border-radius: 0; border-bottom: 2px solid transparent; }
+QPushButton#filterBtn:hover { background: transparent; color: $text; }
+QPushButton#filterBtn:checked { background: transparent; border: 1px solid transparent;
+    border-bottom: 2px solid $accent; color: $text; }
+QPushButton#saveBtn, QPushButton#saveBtn:disabled {
+    background: transparent; border: none; color: $accent; font-family: $font_title; padding: 0 6px;
+}
+QPushButton#saveBtn:hover { background: $accent_soft; color: $accent_press; }
+QPushButton#saveBtn:disabled { color: $faint; font-weight: 400; }
+"""
+
 # Back-compat for callers that apply the default skin directly.
 QSS = build_qss(DEFAULT)
-TEXT, MUTED, ACCENT, PAPER = PINE["text"], PINE["muted"], PINE["accent"], PINE["content_b"]
+TEXT, MUTED, ACCENT = PINE["text"], PINE["muted"], PINE["accent"]

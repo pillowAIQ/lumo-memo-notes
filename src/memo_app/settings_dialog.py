@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -328,35 +329,206 @@ class ThemeCard(QAbstractButton):
         p.end()
 
 
+class StyleCard(QAbstractButton):
+    """风格预览卡：用该风格的推荐配色画出结构示意（三栏行式 / 日历页+细线）。"""
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self.key = key
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumSize(180, 176)
+        self.setMaximumSize(300, 176)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        spec = theme.STYLES[key]
+        self.setAccessibleName(f"风格：{spec['label']}")
+        self.setToolTip(spec["desc"])
+        self._hover = False
+
+    def enterEvent(self, e):  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, e):  # noqa: N802
+        spec = theme.STYLES[self.key]
+        pal = theme.palette(spec["palette"])
+        paper = self.key == "paper"
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        frame = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        outer = QPainterPath()
+        outer.addRoundedRect(frame, 12, 12)
+        p.fillPath(outer, theme.qc("surface"))
+        selected = self.isChecked()
+        ring = theme.qc("accent") if selected else (theme.qc("border_hover") if self._hover else theme.qc("border"))
+        p.setPen(QPen(ring, 2.0 if selected else 1.0))
+        p.drawPath(outer)
+
+        shot = QRectF(10, 10, frame.width() - 17, 112)
+        clip = QPainterPath()
+        clip.addRoundedRect(shot, 8, 8)
+        p.save()
+        p.setClipPath(clip)
+        p.fillRect(shot, QColor(pal["bg"]))
+        side = QRectF(shot.left(), shot.top(), shot.width() * 0.24, shot.height())
+        p.fillRect(side, QColor(pal["side"]))
+        detail = QRectF(shot.right() - shot.width() * 0.3, shot.top() + 8, shot.width() * 0.3, shot.height())
+        lst = QRectF(side.right() + (0 if paper else 6), shot.top() + (0 if paper else 8),
+                     detail.left() - side.right() - (0 if paper else 6), shot.height())
+        if paper:
+            p.setPen(QPen(QColor(pal["line"]), 1))
+            p.drawLine(int(side.right()), int(shot.top()), int(side.right()), int(shot.bottom()))
+            # 日历页：大号日期 + 两行小字
+            p.setPen(QColor(pal["text"]))
+            font = p.font()
+            font.setPixelSize(26)
+            font.setFamilies(["Noto Serif SC", "STSong", "SimSun"])
+            p.setFont(font)
+            p.drawText(QRectF(side.left() + 8, side.top() + 8, side.width(), 30), Qt.AlignmentFlag.AlignLeft, "19")
+            p.fillRect(QRectF(side.left() + 9, side.top() + 42, side.width() * 0.55, 3), QColor(pal["text_2"]))
+            p.fillRect(QRectF(side.left() + 9, side.top() + 49, side.width() * 0.4, 3), QColor(pal["accent"]))
+            for i in range(3):
+                p.fillRect(QRectF(side.left() + 9, side.top() + 64 + i * 11, side.width() * 0.5, 3), QColor(pal["faint"]))
+            x0 = lst.left() + 10
+            p.fillRect(QRectF(x0, lst.top() + 10, 46, 7), QColor(pal["text"]))
+            p.setPen(QPen(QColor(pal["text_2"]), 1))
+            p.drawLine(int(x0), int(lst.top() + 30), int(lst.right() - 8), int(lst.top() + 30))
+            for i in range(3):
+                y = lst.top() + 42 + i * 22
+                p.setPen(QPen(QColor(pal["text_2"]), 1.1))
+                p.drawEllipse(QRectF(x0, y, 8, 8))
+                p.fillRect(QRectF(x0 + 14, y + 2, lst.width() * (0.62 - i * 0.12), 4), QColor(pal["text"]))
+                p.setPen(QPen(QColor(pal["line"]), 1, Qt.PenStyle.DotLine))
+                p.drawLine(int(x0), int(y + 15), int(lst.right() - 8), int(y + 15))
+            p.fillRect(QRectF(x0 - 6, lst.top() + 64, 2, 14), QColor(pal["accent"]))
+        else:
+            p.fillRect(QRectF(side.left() + 6, side.top() + 10, side.width() - 12, 9), QColor(pal["surface"]))
+            for i in range(3):
+                dot = QPainterPath()
+                dot.addRoundedRect(QRectF(side.left() + 8, side.top() + 30 + i * 13, 5, 5), 1.5, 1.5)
+                p.fillPath(dot, QColor(pal["cat_colors"][i]))
+                p.fillRect(QRectF(side.left() + 17, side.top() + 31 + i * 13, side.width() * 0.45, 3), QColor(pal["faint"]))
+            panel = QPainterPath()
+            panel.addRoundedRect(lst.adjusted(0, 0, 0, 10), 6, 6)
+            p.fillPath(panel, QColor(pal["content_a"]))
+            x0 = lst.left() + 8
+            box = QPainterPath()
+            box.addRoundedRect(QRectF(x0, lst.top() + 8, lst.width() - 16, 13), 3, 3)
+            p.fillPath(box, QColor(pal["surface"]))
+            p.fillRect(QRectF(x0, lst.top() + 20, lst.width() - 16, 1.5), QColor(pal["accent"]))
+            for i in range(3):
+                y = lst.top() + 30 + i * 20
+                row = QPainterPath()
+                row.addRoundedRect(QRectF(x0 - 2, y, lst.width() - 12, 16), 4, 4)
+                if i == 1:
+                    p.fillPath(row, QColor(pal["selected"]))
+                    p.fillRect(QRectF(x0 - 2, y + 4, 2, 8), QColor(pal["accent"]))
+                p.setPen(QPen(QColor(pal["prio"] if i == 1 else pal["faint"]), 1.1))
+                p.drawEllipse(QRectF(x0 + 3, y + 4, 8, 8))
+                p.fillRect(QRectF(x0 + 16, y + 6, lst.width() * (0.6 - i * 0.1), 4), QColor(pal["text"]))
+            p.fillRect(detail, QColor(pal["surface"]))
+            p.setPen(QPen(QColor(pal["line"]), 1))
+            p.drawLine(int(detail.left()), int(detail.top()), int(detail.left()), int(shot.bottom()))
+            p.fillRect(QRectF(detail.left() + 8, detail.top() + 10, detail.width() * 0.6, 5), QColor(pal["text"]))
+            for i in range(4):
+                chip = QPainterPath()
+                chip.addRoundedRect(QRectF(detail.left() + 8, detail.top() + 26 + i * 15, detail.width() * 0.7, 9), 2, 2)
+                p.fillPath(chip, QColor(pal["accent_soft"] if i == 0 else pal["surface_alt"]))
+        p.restore()
+
+        p.setPen(theme.qc("text"))
+        font = self.font()
+        font.setPointSizeF(10.5)
+        font.setBold(True)
+        p.setFont(font)
+        p.drawText(QRectF(14, 128, frame.width() - 50, 22), Qt.AlignmentFlag.AlignVCenter, spec["label"])
+        font.setBold(False)
+        font.setPointSizeF(8.5)
+        p.setFont(font)
+        p.setPen(theme.qc("muted"))
+        desc = p.fontMetrics().elidedText(spec["desc"], Qt.TextElideMode.ElideRight,
+                                          int(frame.width() - 28))
+        p.drawText(QRectF(14, 148, frame.width() - 28, 20), Qt.AlignmentFlag.AlignVCenter, desc)
+        if selected:
+            badge = QPainterPath()
+            badge.addEllipse(QRectF(frame.right() - 30, 132, 16, 16))
+            p.fillPath(badge, theme.qc("accent"))
+            p.setPen(QPen(theme.qc("on_accent"), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            cx, cy = frame.right() - 22, 140
+            p.drawLine(int(cx - 4), int(cy), int(cx - 1), int(cy + 3))
+            p.drawLine(int(cx - 1), int(cy + 3), int(cx + 4), int(cy - 3))
+        p.end()
+
+
 class AppearancePage(_Page):
     def __init__(self) -> None:
-        super().__init__("外观", "选择一套皮肤，立即生效；下次启动自动沿用。")
+        super().__init__("外观", "风格决定布局与字体，皮肤决定配色，两者可以自由组合；立即生效，下次启动沿用。")
+        style_label = QLabel("风格")
+        style_label.setObjectName("groupTitle")
+        self.lay.addWidget(style_label)
+        self.lay.addSpacing(10)
+        srow = QHBoxLayout()
+        srow.setSpacing(14)
+        self.style_cards = QButtonGroup(self)
+        self.style_cards.setExclusive(True)
+        for key in theme.STYLES:
+            card = StyleCard(key)
+            card.setChecked(key == theme.style_name())
+            card.clicked.connect(lambda _c=False, k=key: self._pick_style(k))
+            self.style_cards.addButton(card)
+            srow.addWidget(card)
+        srow.addStretch(1)
+        self.lay.addLayout(srow)
+        self.lay.addSpacing(8)
+        shint = QLabel("切换风格会换上它的推荐配色；之后仍可在下方单独更换皮肤。")
+        shint.setObjectName("rowDesc")
+        shint.setWordWrap(True)
+        self.lay.addWidget(shint)
+        self.lay.addSpacing(22)
+
         label = QLabel("皮肤")
         label.setObjectName("groupTitle")
         self.lay.addWidget(label)
         self.lay.addSpacing(10)
-        row = QHBoxLayout()
-        row.setSpacing(14)
+        # 固定三列网格（3 + 2）：五张卡排成一行会在窄窗里撑出横向滚动
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
         self.cards = QButtonGroup(self)
         self.cards.setExclusive(True)
-        for name in theme.PALETTES:
+        for i, name in enumerate(theme.PALETTES):
             card = ThemeCard(name)
             card.setChecked(name == theme.current_name())
             card.clicked.connect(lambda _c=False, n=name: theme.apply(n, persist=True))
             self.cards.addButton(card)
-            row.addWidget(card)
-        row.addStretch(1)
-        self.lay.addLayout(row)
+            grid.addWidget(card, i // 3, i % 3)
+        grid.setColumnStretch(3, 1)
+        self.lay.addLayout(grid)
         self.lay.addSpacing(14)
-        hint = QLabel("松绿：温暖纸感的默认风格 · 墨夜：深色护眼 · 薰衣草：柔和的浅紫")
+        hint = QLabel("云母蓝：清爽的 Windows 蓝 · 宣纸：暖纸与朱砂 · 松绿：温润的绿 · 墨夜：深色护眼 · 薰衣草：柔和的浅紫")
         hint.setObjectName("rowDesc")
         hint.setWordWrap(True)
         self.lay.addWidget(hint)
         self.finish()
 
+    @staticmethod
+    def _pick_style(key: str) -> None:
+        if key != theme.style_name():
+            theme.apply_style(key, persist=True)
+
     def sync_selection(self) -> None:
         for card in self.cards.buttons():
             card.setChecked(card.name == theme.current_name())
+            card.update()
+        for card in self.style_cards.buttons():
+            card.setChecked(card.key == theme.style_name())
             card.update()
 
 
@@ -1011,7 +1183,7 @@ class SettingsView(QWidget):
         if isinstance(sync, SyncSettingsPage):
             sync._banner_icon.setPixmap(ui_icon("cloud", theme.c("accent"), 22).pixmap(22, 22))
         for w in self.findChildren(QWidget):
-            if isinstance(w, (Switch, ThemeCard)):
+            if isinstance(w, (Switch, ThemeCard, StyleCard)):
                 w.update()
 
     def resizeEvent(self, e):  # noqa: N802
