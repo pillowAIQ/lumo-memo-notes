@@ -321,6 +321,9 @@ class _AppPolish(QObject):
             if isinstance(obj, QMenu) and not obj.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
                 # Must happen before the native window exists, or corners stay square.
                 obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                # Fusion 下 Windows 弹出窗的系统投影按矩形绘制，圆角外会露出黑角
+                obj.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+                obj.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
         elif t == QEvent.Type.Show and isinstance(obj, QDialog) and obj.isWindow():
             fade_window_in(obj, FAST + 40)
         return False

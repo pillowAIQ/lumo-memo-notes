@@ -18,16 +18,23 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 
 from .. import db
 from . import crypto, protocol, store
-from .transport import NotFoundError, WebDAVError
+from .transport import (
+    AuthError, NotFoundError, QuotaError, RateLimitedError, WebDAVError,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_OPS_PER_BATCH = protocol.MAX_OPS_PER_BATCH
 MAX_BATCHES_PER_SYNC = 20          # 单轮发布上限，余量留给下轮
 _PACK_SAFE_BYTES = 3 * 1024 * 1024  # 打包估算上限（协议硬上限 4MiB）
+MAX_BLOB_UPLOADS_PER_SYNC = 40     # 单轮图片上传上限，余量留给下轮
+MAX_BLOB_DOWNLOADS_PER_SYNC = 60
+BLOB_MISS_RETRY = 600.0            # 远端暂缺的图片：10 分钟后再试
+MAX_BLOB_BYTES = 12 * 1024 * 1024  # 单张图片上限（远端 GET 硬上限 16MiB）
 
 
 class SyncError(Exception):
@@ -51,6 +58,7 @@ class Engine:
         # 注意：候选仅存内存——flush 失败即丢弃（best-effort），
         # 生产环境 Engine 每轮重建，不做跨轮重试
         self._conflict_pending: dict = {}
+        self._layout_ready = False
         with db.db() as conn:
             self.writer_id = store.profile_writer_id(conn)
 
@@ -66,14 +74,108 @@ class Engine:
         stats = {
             "pulled": 0, "applied_ops": 0, "bad_ops": 0,
             "published": 0, "bootstrapped": 0, "conflict_copies": 0,
+            "blobs_up": 0, "blobs_down": 0,
         }
         p, a, b = self._pull()
         stats["pulled"], stats["applied_ops"], stats["bad_ops"] = p, a, b
         self._flush_conflict_copies()
         stats["conflict_copies"] = self._conflict_copies
+        # 图片本体：先上传本机新图（让随后发布的修订引用的图片尽量已在远端），
+        # 再下载远端修订引用、本机缺失的图片
+        stats["blobs_up"] = self._upload_blobs()
         pub, boot = self._publish()
         stats["published"], stats["bootstrapped"] = pub, boot
+        stats["blobs_down"] = self._download_blobs()
+        if stats["applied_ops"]:
+            try:
+                db.cleanup_orphan_images()
+                db.cleanup_unreferenced_image_files()
+            except (sqlite3.Error, OSError):
+                logger.warning("image cleanup after sync failed")
         return stats
+
+    # ---------- 图片 blob ----------
+
+    def _upload_blobs(self) -> int:
+        with db.db() as conn:
+            names = store.blobs_to_upload(conn, MAX_BLOB_UPLOADS_PER_SYNC)
+        if not names:
+            return 0
+        self._ensure_layout()
+        uploaded = 0
+        for name in names:
+            if not protocol.is_blob_name(name):
+                continue  # 旧式文件名（迁移前文件丢失）：无法内容寻址，跳过
+            try:
+                data = db.image_path(name).read_bytes()
+            except OSError:
+                continue  # 本机文件已丢失：留给其他设备上传
+            if not db.image_bytes_match(name, data) or len(data) > MAX_BLOB_BYTES:
+                continue
+            rel = protocol.blob_rel(name)
+            try:
+                if not self.client.exists(rel):
+                    blob = crypto.aes_gcm_encrypt(
+                        self.master_key, data, crypto.blob_aad(self.vault_id, name)
+                    )
+                    # 内容寻址：同名即同内容，并发上传同一张图互不冲突
+                    self.client.put(rel, blob)
+                    uploaded += 1
+            except (AuthError, RateLimitedError):
+                raise  # 交给服务层退避 / 提示重新登录
+            except WebDAVError as e:
+                # 图片上传失败（含配额不足）不阻塞文字修订的发布，下轮再试
+                logger.warning("image upload failed: %s", e)
+                if isinstance(e, QuotaError):
+                    break
+                continue
+            with db.db() as conn:
+                store.mark_blob_uploaded(conn, name)
+        return uploaded
+
+    def _download_blobs(self) -> int:
+        """下载被引用但本机没有的图片。单张失败不影响同步结果。"""
+        now = time.time()
+        with db.db() as conn:
+            names = [
+                n for n in store.referenced_blob_names(conn)
+                if protocol.is_blob_name(n)
+                and not db.image_path(n).exists()
+                and now - store.blob_last_miss(conn, n) > BLOB_MISS_RETRY
+            ][:MAX_BLOB_DOWNLOADS_PER_SYNC]
+        got = 0
+        for name in names:
+            try:
+                blob = self.client.get(protocol.blob_rel(name))
+                data = crypto.aes_gcm_decrypt(
+                    self.master_key, blob, crypto.blob_aad(self.vault_id, name)
+                )
+            except NotFoundError:
+                # 对方还没上传完：稍后再试
+                with db.db() as conn:
+                    store.mark_blob_missing(conn, name, now)
+                continue
+            except (AuthError, RateLimitedError):
+                raise
+            except WebDAVError as e:
+                logger.warning("image download failed: %s", e)
+                break
+            except crypto.CryptoError:
+                logger.warning("image blob %s failed to decrypt", name[:12])
+                with db.db() as conn:
+                    store.mark_blob_missing(conn, name, now)
+                continue
+            if not db.image_bytes_match(name, data):
+                logger.warning("image blob %s hash mismatch", name[:12])
+                with db.db() as conn:
+                    store.mark_blob_missing(conn, name, now)
+                continue
+            ext = name.rsplit(".", 1)[1]
+            db.store_image_bytes(data, ext)
+            with db.db() as conn:
+                store.mark_blob_uploaded(conn, name)  # 远端已有，无需再传
+            got += 1
+        return got
 
     # ---------- 拉取 ----------
 
@@ -317,6 +419,14 @@ class Engine:
             protocol.is_uuid(c) for c in cus
         ):
             raise ValueError("category_uuids invalid")
+        if "images" in d:
+            imgs = d["images"]
+            if (
+                not isinstance(imgs, list)
+                or len(imgs) > protocol.MAX_IMAGES_PER_MEMO
+                or not all(protocol.is_blob_name(n) for n in imgs)
+            ):
+                raise ValueError("images invalid")
 
     def _apply_memo(self, conn, uuid: str, d: dict) -> None:
         self._check_memo_data(d)
@@ -357,6 +467,10 @@ class Engine:
                 (uuid, *fields),
             )
             mid = int(cur.lastrowid)
+        # 图片：只有修订携带 images 字段时才替换——旧版本客户端的修订
+        # 不含该字段，不能因此清空本机图片
+        if "images" in d:
+            self._set_memo_images(conn, mid, d["images"])
         # 分类归属：按 uuid 解析本地 id；分类未到时登记 pending_links，
         # 由 _apply_category / _pull 末尾的 sweep 回填
         conn.execute("DELETE FROM memo_categories WHERE memo_id = ?", (mid,))
@@ -372,6 +486,22 @@ class Engine:
                 )
             else:
                 store.add_pending_link(conn, uuid, cu)
+
+    @staticmethod
+    def _set_memo_images(conn, mid: int, names: list) -> None:
+        current = [
+            r["filename"] for r in conn.execute(
+                "SELECT filename FROM memo_images WHERE memo_id = ? ORDER BY id", (mid,)
+            )
+        ]
+        if current == list(names):
+            return
+        conn.execute("DELETE FROM memo_images WHERE memo_id = ?", (mid,))
+        now = db.now_iso()
+        conn.executemany(
+            "INSERT INTO memo_images(memo_id, filename, created_at) VALUES (?, ?, ?)",
+            [(mid, n, now) for n in names],
+        )
 
     def _flush_conflict_copies(self) -> None:
         """把本轮收集的落败候选落为冲突副本（每实体一条）。
@@ -414,6 +544,7 @@ class Engine:
             due_ts=d.get("due_ts"), priority=d.get("priority", 0),
             recur=d.get("recur"), remind_advance=d.get("remind_advance", 0),
             category_uuids=d.get("category_uuids") or [],
+            images=d.get("images") or [],
         )
         self._txn_copies += 1
 
@@ -441,6 +572,7 @@ class Engine:
             due_ts=row["due_ts"], priority=row["priority"],
             recur=row["recur"], remind_advance=row["remind_advance"],
             category_uuids=cats,
+            images=store.memo_image_names(conn, row["id"]) or [],
         )
         self._txn_copies += 1
 
@@ -464,6 +596,7 @@ class Engine:
         self, conn, *, content: str, is_pinned, is_done: int,
         created_at, updated_at, deleted_at,
         due_ts, priority, recur, remind_advance, category_uuids,
+        images=(),
     ) -> int:
         # 入参可能来自远端 JSON（类型未深校验）——全部收敛后再绑定
         due = self._copy_int(due_ts, -1)
@@ -488,6 +621,10 @@ class Engine:
             ),
         )
         mid = int(cur.lastrowid)
+        names = [n for n in (images if isinstance(images, (list, tuple)) else [])
+                 if protocol.is_blob_name(n)][:protocol.MAX_IMAGES_PER_MEMO]
+        if names:
+            self._set_memo_images(conn, mid, names)
         cats = category_uuids if isinstance(category_uuids, list) else []
         for cu in cats:
             if not isinstance(cu, str):
@@ -544,12 +681,16 @@ class Engine:
         return f"{protocol.COMMITS_DIR}/{wid}/{seq}.enc"
 
     def _ensure_layout(self) -> None:
-        """幂等创建 vault 根下 heads/commits/commits/<wid>。"""
+        """幂等创建 vault 根下 heads/commits/commits/<wid>/blobs。"""
+        if self._layout_ready:
+            return
         self.client.mkcol_root()
         self.client.mkcol("")          # vault 根集合
         self.client.mkcol(protocol.HEADS_DIR)
         self.client.mkcol(protocol.COMMITS_DIR)
         self.client.mkcol(f"{protocol.COMMITS_DIR}/{self.writer_id}")
+        self.client.mkcol(protocol.BLOBS_DIR)
+        self._layout_ready = True
 
     def _publish(self) -> tuple[int, int]:
         published = bootstrapped = 0

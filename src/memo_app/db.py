@@ -6,7 +6,9 @@ memos 表字段说明：
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import sqlite3
 import time
 from contextlib import closing, contextmanager
@@ -108,6 +110,13 @@ def init_db() -> None:
                 category_id INTEGER NOT NULL,
                 PRIMARY KEY (memo_id, category_id)
             );
+            CREATE TABLE IF NOT EXISTS memo_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memo_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memo_images_memo ON memo_images(memo_id);
             CREATE TABLE IF NOT EXISTS memo_snooze (
                 memo_id INTEGER PRIMARY KEY,
                 remind_ts INTEGER NOT NULL,
@@ -116,7 +125,12 @@ def init_db() -> None:
             """
         )
         _migrate_memos(conn)
+        _migrate_categories(conn)
         sync_store.ensure_schema(conn)
+        _migrate_image_names(conn)
+    # 同步删除的备忘录不会经过 purge()：启动时顺带清理孤儿图片
+    cleanup_orphan_images()
+    cleanup_unreferenced_image_files()
 
 
 def _migrate_memos(conn: sqlite3.Connection) -> None:
@@ -144,6 +158,13 @@ def _migrate_memos(conn: sqlite3.Connection) -> None:
         "UPDATE memos SET notified = 2 WHERE notified = 1 "
         "AND (remind_advance = 0 OR due_ts IS NULL)"
     )
+
+
+def _migrate_categories(conn: sqlite3.Connection) -> None:
+    """旧库补列：sort_order（侧边栏拖动排序；仅本机生效，不参与同步）。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(categories)")}
+    if "sort_order" not in cols:
+        conn.execute("ALTER TABLE categories ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager
@@ -598,6 +619,7 @@ def purge(memo_id: int) -> None:
         conn.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
         if row is not None and row["uuid"]:
             sync_store.enqueue_memo_delete(conn, row["uuid"])
+    cleanup_orphan_images()
 
 
 def purge_all_trash() -> int:
@@ -613,7 +635,170 @@ def purge_all_trash() -> int:
         for r in rows:
             if r["uuid"]:
                 sync_store.enqueue_memo_delete(conn, r["uuid"])
-        return len(rows)
+    cleanup_orphan_images()
+    return len(rows)
+
+
+# ---------- 图片附件 ----------
+# 文件名 = 内容 sha256 + 扩展名（内容寻址）：同一张图跨设备同名，
+# 同步时只需在备忘录修订里携带文件名列表，图片本体加密后单独上传到 blobs/。
+
+IMAGE_NAME_RE = re.compile(r"^[0-9a-f]{64}\.(png|jpg)$")
+MAX_IMAGES_PER_MEMO = 200
+
+
+def images_dir() -> Path:
+    return data_dir() / "images"
+
+
+def image_path(filename: str) -> Path:
+    # 只取文件名部分，防止库里的值带路径穿越
+    return images_dir() / Path(filename).name
+
+
+def is_image_name(name: object) -> bool:
+    return isinstance(name, str) and bool(IMAGE_NAME_RE.match(name))
+
+
+def image_name_for(data: bytes, ext: str) -> str:
+    return f"{hashlib.sha256(data).hexdigest()}.{ext}"
+
+
+def store_image_bytes(data: bytes, ext: str) -> str:
+    """按内容哈希写入图片目录（已存在则复用），返回文件名。"""
+    if ext not in ("png", "jpg"):
+        raise ValueError("unsupported image type")
+    name = image_name_for(data, ext)
+    path = image_path(name)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".part")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    return name
+
+
+def image_bytes_match(name: str, data: bytes) -> bool:
+    """下载校验：内容哈希必须与文件名一致（防篡改 / 损坏）。"""
+    return is_image_name(name) and hashlib.sha256(data).hexdigest() == name.split(".", 1)[0]
+
+
+def add_memo_image(memo_id: int, filename: str) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO memo_images(memo_id, filename, created_at) VALUES (?, ?, ?)",
+            (memo_id, Path(filename).name, now_iso()),
+        )
+        conn.execute("UPDATE memos SET updated_at = ? WHERE id = ?", (now_iso(), memo_id))
+        sync_store.enqueue_memo(conn, memo_id)
+        return int(cur.lastrowid)
+
+
+def list_memo_images(memo_id: int) -> list[tuple[int, str]]:
+    """[(image_id, filename), ...]，按添加顺序。"""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, filename FROM memo_images WHERE memo_id = ? ORDER BY id", (memo_id,)
+        ).fetchall()
+    return [(int(r["id"]), r["filename"]) for r in rows]
+
+
+def memo_image_counts() -> dict[int, int]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT memo_id, COUNT(*) AS n FROM memo_images GROUP BY memo_id"
+        ).fetchall()
+    return {int(r["memo_id"]): int(r["n"]) for r in rows}
+
+
+def _unlink_image(filename: str) -> None:
+    try:
+        image_path(filename).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def delete_memo_image(image_id: int) -> None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT memo_id, filename FROM memo_images WHERE id = ?", (image_id,)
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute("DELETE FROM memo_images WHERE id = ?", (image_id,))
+        conn.execute("UPDATE memos SET updated_at = ? WHERE id = ?", (now_iso(), row["memo_id"]))
+        sync_store.enqueue_memo(conn, row["memo_id"])
+        still_used = conn.execute(
+            "SELECT 1 FROM memo_images WHERE filename = ? LIMIT 1", (row["filename"],)
+        ).fetchone()
+    if still_used is None:
+        _unlink_image(row["filename"])
+
+
+def cleanup_orphan_images() -> int:
+    """删除所属备忘录已不存在的图片（彻底删除 / 同步删除之后）。返回清理数量。"""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, filename FROM memo_images WHERE memo_id NOT IN (SELECT id FROM memos)"
+        ).fetchall()
+        if not rows:
+            return 0
+        conn.execute("DELETE FROM memo_images WHERE memo_id NOT IN (SELECT id FROM memos)")
+        used = {r["filename"] for r in conn.execute("SELECT filename FROM memo_images")}
+    for r in rows:
+        if r["filename"] not in used:
+            _unlink_image(r["filename"])
+    return len(rows)
+
+
+def cleanup_unreferenced_image_files(min_age: float = 3600.0) -> int:
+    """删除没有任何记录引用的图片文件（同步替换了图片列表等）。
+
+    只删超过 min_age 秒的文件：刚写入、还没来得及登记的不会被误删。"""
+    folder = images_dir()
+    if not folder.is_dir():
+        return 0
+    with db() as conn:
+        used = {r["filename"] for r in conn.execute("SELECT filename FROM memo_images")}
+    now = time.time()
+    n = 0
+    for f in folder.iterdir():
+        try:
+            if f.is_file() and f.name not in used and now - f.stat().st_mtime > min_age:
+                f.unlink()
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+def _migrate_image_names(conn: sqlite3.Connection) -> None:
+    """早期版本按随机 uuid 命名图片：改为内容哈希命名，并让这些备忘录重新入同步队列。"""
+    rows = conn.execute("SELECT id, memo_id, filename FROM memo_images").fetchall()
+    touched: set[int] = set()
+    for r in rows:
+        name = r["filename"]
+        if is_image_name(name):
+            continue
+        src = image_path(name)
+        try:
+            data = src.read_bytes()
+        except OSError:
+            continue  # 文件已丢失：保持原样（界面显示"图片丢失"）
+        ext = "jpg" if src.suffix.lower() in (".jpg", ".jpeg") else "png"
+        new = image_name_for(data, ext)
+        dst = image_path(new)
+        try:
+            if dst.exists():
+                src.unlink()
+            else:
+                os.replace(src, dst)
+        except OSError:
+            continue
+        conn.execute("UPDATE memo_images SET filename = ? WHERE id = ?", (new, r["id"]))
+        touched.add(int(r["memo_id"]))
+    for mid in touched:
+        sync_store.enqueue_memo(conn, mid)
 
 
 # ---------- 分类（文件夹） ----------
@@ -630,7 +815,9 @@ class Category:
 def list_categories() -> list[Category]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, name, collapsed, uuid FROM categories ORDER BY id"
+            # sort_order = 0 表示从未手动排序（含同步拉下来的新分类）：排在已排序的之后，按创建顺序
+            "SELECT id, name, collapsed, uuid FROM categories "
+            "ORDER BY CASE WHEN sort_order = 0 THEN 1 ELSE 0 END, sort_order, id"
         ).fetchall()
     return [
         Category(r["id"], r["name"], bool(r["collapsed"]), r["uuid"] or "")
@@ -648,6 +835,29 @@ def create_category(name: str) -> int:
         cid = int(cur.lastrowid)
         sync_store.enqueue_category(conn, cid)
         return cid
+
+
+def reorder_categories(cat_ids: list[int]) -> None:
+    """按给定顺序重排分类（侧边栏拖动）。未列出的分类保持在其后。"""
+    with db() as conn:
+        conn.executemany(
+            "UPDATE categories SET sort_order = ? WHERE id = ?",
+            [(i + 1, cid) for i, cid in enumerate(cat_ids)],
+        )
+
+
+def move_category(cat_id: int, target_id: int, after: bool) -> bool:
+    """把 cat_id 移到 target_id 之前（after=False）或之后（after=True）。返回是否有变化。"""
+    order = [c.id for c in list_categories()]
+    if cat_id == target_id or cat_id not in order or target_id not in order:
+        return False
+    new = [c for c in order if c != cat_id]
+    idx = new.index(target_id) + (1 if after else 0)
+    new.insert(idx, cat_id)
+    if new == order:
+        return False
+    reorder_categories(new)
+    return True
 
 
 def delete_category(cat_id: int) -> None:

@@ -10,13 +10,14 @@ import sqlite3
 from datetime import datetime
 from html import escape
 
-from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
+from PySide6.QtCore import QEasingCurve, QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
     QButtonGroup,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from . import db
 from . import effects
+from . import images
 from . import nlp_time
 from .category_dialog import CategoryPickerDialog
 from .db import Category, Memo
@@ -340,11 +342,15 @@ def cat_marker(cat_id: int, size: int = 16) -> QPixmap:
     return pm
 
 
+_CAT_MIME = "application/x-lumo-category"
+
+
 class CategoryRow(QWidget):
-    """侧边栏分类行：点击选中，悬停出现删除。"""
+    """侧边栏分类行：点击选中，悬停出现删除，按住拖动可调整分类顺序。"""
 
     activated = Signal(int)          # cat_id，0 = 全部
     delete_requested = Signal(int)
+    move_requested = Signal(int, int, bool)  # 被拖的 cat_id, 目标 cat_id, 是否放在目标之后
 
     def __init__(self, cat_id: int, name: str, count: int = 0):
         super().__init__()
@@ -357,7 +363,10 @@ class CategoryRow(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(f"{name}，{count} 条备忘录")
-        self.setToolTip(name)
+        self.setToolTip(name if cat_id == 0 else f"{name}\n按住拖动可调整顺序")
+        self._press_pos: QPoint | None = None
+        self._drop_mark: str | None = None  # "above" / "below"：拖放落点指示线
+        self.setAcceptDrops(cat_id != 0)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 0, 6, 0)
@@ -406,12 +415,105 @@ class CategoryRow(QWidget):
 
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = e.position().toPoint()
             self.activated.emit(self.cat_id)
         super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if (
+            self.cat_id != 0 and self._press_pos is not None
+            and e.buttons() & Qt.MouseButton.LeftButton
+            and (e.position().toPoint() - self._press_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._press_pos = None
+            self._start_drag()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        self._press_pos = None
+        super().mouseReleaseEvent(e)
+
+    def _start_drag(self) -> None:
+        mime = QMimeData()
+        mime.setData(_CAT_MIME, str(self.cat_id).encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pm = self.grab()
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(self.width() // 2, self.height() // 2))
+        drag.exec(Qt.DropAction.MoveAction)
+
+    @staticmethod
+    def _drag_source_id(e) -> int | None:
+        md = e.mimeData()
+        if not md.hasFormat(_CAT_MIME):
+            return None
+        try:
+            return int(bytes(md.data(_CAT_MIME)).decode())
+        except ValueError:
+            return None
+
+    def _set_drop_mark(self, mark: str | None) -> None:
+        if mark != self._drop_mark:
+            self._drop_mark = mark
+            self.update()
+
+    def dragEnterEvent(self, e):  # noqa: N802
+        src = self._drag_source_id(e)
+        if src is not None and src != self.cat_id:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):  # noqa: N802
+        src = self._drag_source_id(e)
+        if src is None or src == self.cat_id:
+            self._set_drop_mark(None)
+            e.ignore()
+            return
+        self._set_drop_mark("below" if e.position().y() > self.height() / 2 else "above")
+        e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):  # noqa: N802
+        self._set_drop_mark(None)
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):  # noqa: N802
+        src = self._drag_source_id(e)
+        after = e.position().y() > self.height() / 2
+        self._set_drop_mark(None)
+        if src is None or src == self.cat_id:
+            e.ignore()
+            return
+        e.acceptProposedAction()
+        # 落点处理会重建侧边栏（销毁本行），推迟到拖放事件返回之后
+        QTimer.singleShot(0, lambda s=src, t=self.cat_id, a=after: self.move_requested.emit(s, t, a))
+
+    def paintEvent(self, e):  # noqa: N802
+        super().paintEvent(e)
+        if self._drop_mark is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        y = 1.5 if self._drop_mark == "above" else self.height() - 1.5
+        p.setPen(QPen(theme.qc("accent"), 2.0))
+        p.drawLine(QPointF(6, y), QPointF(self.width() - 6, y))
+        p.setBrush(theme.qc("accent"))
+        p.drawEllipse(QPointF(6, y), 3, 3)
+        p.end()
 
     def keyPressEvent(self, e):  # noqa: N802
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             self.activated.emit(self.cat_id)
+            return
+        # Alt+↑ / Alt+↓：键盘调整分类顺序
+        if (
+            self.cat_id != 0 and e.modifiers() & Qt.KeyboardModifier.AltModifier
+            and e.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+        ):
+            self.move_requested.emit(self.cat_id, self.cat_id, e.key() == Qt.Key.Key_Down)
             return
         if e.key() == Qt.Key.Key_Delete and self.cat_id != 0:
             self.delete_requested.emit(self.cat_id)
@@ -731,6 +833,9 @@ class MemoItemWidget(QWidget):
             )
         if m.recur:
             parts.append(f'<span style="color:{theme.c("muted")}">{escape(db.RECUR_LABELS.get(m.recur, m.recur))}</span>')
+        n_img = getattr(self.win, "_img_counts", {}).get(m.id, 0)
+        if n_img:
+            parts.append(f'<span style="color:{theme.c("muted")}">图片 {n_img}</span>')
         return "&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts)
 
     def _badges_tooltip(self) -> str:
@@ -744,6 +849,9 @@ class MemoItemWidget(QWidget):
             tips.append(f"优先级：{db.PRIORITY_LABELS[m.priority]}")
         if m.recur:
             tips.append(f"重复：{db.RECUR_LABELS.get(m.recur, m.recur)}")
+        n_img = getattr(self.win, "_img_counts", {}).get(m.id, 0)
+        if n_img:
+            tips.append(f"{n_img} 张图片（选中后在详情栏查看）")
         return "\n".join(tips)
 
     # ---------- 绘制 / 动效 ----------
@@ -950,7 +1058,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(f"{theme.APP_NAME} · {theme.APP_NAME_EN}")
-        self.setWindowIcon(make_icon(64))
+        self.setWindowIcon(make_icon())
         # FramelessWindowHint 会移除 WS_SYSMENU/WS_MINIMIZEBOX/WS_MAXIMIZEBOX，
         # 任务栏点击发来的 WM_SYSCOMMAND SC_MINIMIZE/SC_RESTORE 会被忽略；
         # 这三个提示只补回对应原生样式位，不产生可见边框。
@@ -1010,6 +1118,7 @@ class MainWindow(QMainWindow):
         brand.setContentsMargins(8, 0, 0, 0)
         brand.setSpacing(10)
         self.brand_mark = QLabel()
+        self.brand_mark.setPixmap(mark_pixmap(32))
         brand.addWidget(self.brand_mark)
         brand_text = QVBoxLayout()
         brand_text.setSpacing(0)
@@ -1156,7 +1265,27 @@ class MainWindow(QMainWindow):
         self.input_edit.setPlaceholderText("此刻，有什么想记下来？")
         self.input_edit.setAccessibleName("新备忘录内容")
         self.input_edit.installEventFilter(self)
+        self.input_edit.setAcceptDrops(True)
         input_row.addWidget(self.input_edit, 1)
+        # 待随新记录保存的图片（粘贴 / 拖入 / 选择文件）
+        self._pending_images: list = []
+        self.pending_chip = QPushButton()
+        self.pending_chip.setObjectName("chipGhost")
+        self.pending_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pending_chip.setToolTip("点击移除待添加的图片")
+        self.pending_chip.setAccessibleName("移除待添加的图片")
+        self.pending_chip.clicked.connect(self._clear_pending_images)
+        self.pending_chip.setVisible(False)
+        input_row.addWidget(self.pending_chip)
+        self.img_btn = QToolButton()
+        self.img_btn.setObjectName("sectionAdd")
+        self.img_btn.setFixedSize(30, 30)
+        self.img_btn.setIconSize(QSize(17, 17))
+        self.img_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.img_btn.setToolTip("添加图片（也可直接 Ctrl+V 粘贴截图，或把图片拖到输入框）")
+        self.img_btn.setAccessibleName("添加图片")
+        self.img_btn.clicked.connect(self._pick_compose_images)
+        input_row.addWidget(self.img_btn)
         self.save_btn = QPushButton("记录")
         self.save_btn.setObjectName("saveBtn")
         self.save_btn.setFixedHeight(34)
@@ -1298,19 +1427,15 @@ class MainWindow(QMainWindow):
         sc.setContext(Qt.ShortcutContext.WidgetShortcut)
         sc.activated.connect(self._delete_selected)
 
-    def _mark(self, size: int):
-        return mark_pixmap(size, theme.c("accent_hover"), theme.c("accent_press"))
-
     def _retheme(self, *_args) -> None:
         """皮肤切换：刷新所有按调色板着色的图标，并重建列表/侧栏。"""
         text_2, muted = theme.c("text_2"), theme.c("muted")
         self.titlebar.retheme()
-        self.titlebar.icon.setPixmap(self._mark(18))
-        self.brand_mark.setPixmap(self._mark(32))
         self.trash_btn.setIcon(ui_icon("trash", text_2, 16))
         self.settings_btn.setIcon(ui_icon("gear", text_2, 16))
         self.add_cat_btn.setIcon(ui_icon("plus", muted, 14))
         self.compose_icon.setPixmap(ui_icon("note", muted, 22).pixmap(22, 22))
+        self.img_btn.setIcon(ui_icon("image", muted, 17))
         self.empty_icon.setPixmap(ui_icon("note", muted, 40).pixmap(40, 40))
         self.trash_back_btn.setIcon(ui_icon("back", theme.c("trash_text"), 14))
         self._sync_save_btn(self.input_edit.text())
@@ -1347,6 +1472,7 @@ class MainWindow(QMainWindow):
     def _refresh_category_data(self) -> None:
         self._categories = db.list_categories()
         self._memo_cats = db.memo_category_map()
+        self._img_counts = db.memo_image_counts()
         self._all_memos = db.list_memos()
         self._cat_names = {c.id: c.name for c in self._categories}
         if self.selected_category is not None and self.selected_category not in self._cat_names:
@@ -1363,7 +1489,18 @@ class MainWindow(QMainWindow):
         )
         if signature == getattr(self, "_sidebar_signature", None):
             return
+        old = getattr(self, "_sidebar_signature", None)
         self._sidebar_signature = signature
+        if old is not None and old[:2] == signature[:2]:
+            # 只有选中项变了：原地更新高亮，不重建——按下的那一行要继续接收
+            # 鼠标移动事件，才能被拖动排序
+            for i in range(self.side_rows.count()):
+                w = self.side_rows.itemAt(i).widget()
+                if isinstance(w, CategoryRow):
+                    sel = (self.selected_category is None if w.cat_id == 0
+                           else self.selected_category == w.cat_id)
+                    w.set_selected(sel and not self.trash_mode)
+            return
         focused = QApplication.focusWidget()
         focused_cat = focused.cat_id if isinstance(focused, CategoryRow) else None
         while self.side_rows.count():
@@ -1386,6 +1523,7 @@ class MainWindow(QMainWindow):
             row.set_selected(self.selected_category == cat.id and not self.trash_mode)
             row.activated.connect(self._on_cat_select)
             row.delete_requested.connect(self._on_cat_delete)
+            row.move_requested.connect(self._on_cat_move)
             self.side_rows.addWidget(row)
             if focused_cat == cat.id:
                 QTimer.singleShot(0, row, row.setFocus)
@@ -1396,6 +1534,26 @@ class MainWindow(QMainWindow):
             self._set_trash(False)
         else:
             self.reload()
+
+    def _on_cat_move(self, cat_id: int, target_id: int, after: bool) -> None:
+        """拖动排序；target_id == cat_id 表示键盘 Alt+↑/↓ 与相邻分类交换。"""
+        if target_id == cat_id:
+            order = [c.id for c in self._categories]
+            if cat_id not in order:
+                return
+            i = order.index(cat_id) + (1 if after else -1)
+            if not 0 <= i < len(order):
+                return
+            target_id = order[i]
+        if not db.move_category(cat_id, target_id, after):
+            return
+        self.reload()
+        # 键盘排序后焦点跟随被移动的分类
+        for i in range(self.side_rows.count()):
+            w = self.side_rows.itemAt(i).widget()
+            if isinstance(w, CategoryRow) and w.cat_id == cat_id:
+                w.setFocus()
+                break
 
     def _on_cat_delete(self, cat_id: int) -> None:
         cat = next((c for c in self._categories if c.id == cat_id), None)
@@ -1807,10 +1965,39 @@ class MainWindow(QMainWindow):
     # ---------- 操作 ----------
 
     def _sync_save_btn(self, text: str) -> None:
-        on = bool(text.strip())
+        on = bool(text.strip()) or bool(getattr(self, "_pending_images", None))
         self.save_btn.setEnabled(on)
         color = ("accent" if theme.is_paper() else "on_accent") if on else "faint"
         self.save_btn.setIcon(ui_icon("arrow", theme.c(color), 14))
+
+    # ---------- 新记录附带图片 ----------
+
+    def _add_pending_images(self, imgs: list) -> None:
+        imgs = [i for i in imgs if i is not None and not i.isNull()]
+        if not imgs:
+            return
+        self._pending_images.extend(imgs)
+        self._sync_pending_chip()
+        self.input_edit.setFocus()
+
+    def _clear_pending_images(self) -> None:
+        self._pending_images.clear()
+        self._sync_pending_chip()
+        self.input_edit.setFocus()
+
+    def _sync_pending_chip(self) -> None:
+        n = len(self._pending_images)
+        self.pending_chip.setText(f"{n} 张图片  ✕")
+        self.pending_chip.setVisible(n > 0)
+        self._sync_save_btn(self.input_edit.text())
+
+    def _pick_compose_images(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "添加图片", "", images.FILE_FILTER)
+        loaded = [images.load_file(p) for p in paths]
+        ok = [i for i in loaded if not i.isNull()]
+        if paths and not ok:
+            self._notify("无法读取所选图片", "info")
+        self._add_pending_images(ok)
 
     def _notify(self, text: str, icon: str = "check", action: str | None = None, callback=None) -> None:
         # 挂件/托盘触发的操作不在隐藏的主窗口里弹提示
@@ -1882,7 +2069,18 @@ class MainWindow(QMainWindow):
             if self.selected_category is not None
             else None
         )
-        mid = self.add_memo_text(self.input_edit.text(), cats)
+        text = self.input_edit.text()
+        pending = list(self._pending_images)
+        if not text.strip() and pending:
+            text = "图片笔记"
+        mid = self.add_memo_text(text, cats)
+        if mid is not None and pending:
+            added = sum(1 for img in pending if images.attach_image(mid, img))
+            self._pending_images.clear()
+            self._sync_pending_chip()
+            self.reload()
+            if added < len(pending):
+                self._notify(f"有 {len(pending) - added} 张图片保存失败", "info")
         if mid is not None:
             if self.status_filter != "all" or self.search_edit.text():
                 self.status_filter = "all"
@@ -1991,6 +2189,24 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, e):  # noqa: N802
         if obj is getattr(self, "input_edit", None) and e.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
             self.composer.set_active(e.type() == QEvent.Type.FocusIn)
+        if obj is getattr(self, "input_edit", None):
+            et = e.type()
+            if et == QEvent.Type.KeyPress and e.matches(QKeySequence.StandardKey.Paste):
+                md = QApplication.clipboard().mimeData()
+                # 纯文本照常粘贴；截图 / 复制的图片文件转为待添加图片
+                if not (md is not None and md.hasText() and not md.hasUrls()):
+                    imgs = images.images_from_mime(md)
+                    if imgs:
+                        self._add_pending_images(imgs)
+                        return True
+            elif et in (QEvent.Type.DragEnter, QEvent.Type.DragMove) and images.mime_has_image(e.mimeData()):
+                e.acceptProposedAction()
+                return True
+            elif et == QEvent.Type.Drop and images.mime_has_image(e.mimeData()):
+                imgs = images.images_from_mime(e.mimeData())
+                e.acceptProposedAction()
+                QTimer.singleShot(0, self, lambda: self._add_pending_images(imgs))
+                return True
         if obj is getattr(self, "search_edit", None) and e.type() == QEvent.Type.KeyPress and e.key() == Qt.Key.Key_Escape:
             self.search_edit.clear()
             (self.list if self.trash_mode else self.input_edit).setFocus()

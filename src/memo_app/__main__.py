@@ -9,6 +9,7 @@ from . import single_instance
 from . import theme
 from .app import MainWindow
 from .controller import Controller
+from .icons import make_icon
 
 
 def _setup_logging() -> None:
@@ -35,6 +36,7 @@ def main() -> None:
     app.setApplicationName("memo")
     app.setOrganizationName("memo_app")
     app.setApplicationDisplayName(theme.APP_NAME)
+    app.setWindowIcon(make_icon())
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
 

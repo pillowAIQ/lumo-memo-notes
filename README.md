@@ -1,8 +1,8 @@
 # 轻笺 · Lumo｜Windows 备忘录、桌面便签与待办事项
 
-随手记下灵感，把待办留在桌面。轻笺是一款基于 Python + PySide6 的 Windows 桌面备忘录软件，支持全局快捷记录、分类搜索、截止提醒、桌面待办挂件，以及可选的坚果云 WebDAV 加密同步。
+随手记下灵感，把待办留在桌面。轻笺是一款基于 Python + PySide6 的 Windows 桌面备忘录软件，支持图文笔记、全局快捷记录、分类搜索、截止提醒、桌面待办挂件，以及可选的坚果云 WebDAV 加密同步。
 
-**Lumo is a Windows memo and notes app with desktop sticky notes, to-do lists, reminders, global quick capture, and optional encrypted WebDAV sync.**
+**Lumo is a Windows memo and notes app with image attachments, desktop sticky notes, to-do lists, reminders, global quick capture, and optional encrypted WebDAV sync.**
 
 [下载 Windows 版](https://github.com/pillowAIQ/lumo-notes/releases/latest) · [安装与更新](docs/installation-and-updates.md) · [同步使用指南](docs/jianguoyun-sync-user-guide.md) · [开发与打包](docs/packaging.md)
 
@@ -13,11 +13,12 @@
 | 场景 | 功能 |
 | --- | --- |
 | 灵感来了，马上记下 | 默认 **Ctrl+O** 全局呼出快捷输入框，Enter 保存；支持 `/分类名` 和 Tab 补全 |
-| 日常笔记与备忘 | 分类、置顶、内容搜索、双击编辑；删除后可从回收站恢复 |
+| 日常笔记与备忘 | 分类、置顶、内容搜索、双击编辑；删除后可从回收站恢复；侧栏按住拖动调整分类顺序 |
+| 图文一起记 | 输入框里 **Ctrl+V** 粘贴截图、拖入图片或点图片按钮选择文件，和文字一起保存；详情栏查看缩略图，单击用系统看图打开，可复制或删除 |
 | 管理待办事项 | 优先级、截止时间、重复提醒，支持“明天9点”等自然语言时间输入；到期置顶弹窗和声音提醒，可完成或延后 5 分钟 |
-| 桌面随时查看 | 半透明置顶待办挂件，按分类展开；点击“还有 N 条”查看全部，过长时滚动浏览；支持勾选完成、拖动和收起为标题条 |
+| 桌面随时查看 | 半透明置顶待办挂件，按分类展开；点击“还有 N 条”查看全部，过长时滚动浏览；支持勾选完成、拖动（可藏一半到屏幕边缘外）和收起为标题条 |
 | 按喜好调整外观 | 「设置 → 外观」可切换云母三栏布局或纸笺手帐布局，也可单独选择配色 |
-| 多台 Windows 电脑接着写 | 可选坚果云 WebDAV 双向同步，每 30 分钟定时同步，编辑后约 20 秒同步，也可手动同步；AES-256-GCM 加密，支持冲突副本 |
+| 多台 Windows 电脑接着写 | 可选坚果云 WebDAV 双向同步（含图片），每 30 分钟定时同步，编辑后约 20 秒同步，也可手动同步；AES-256-GCM 加密，支持冲突副本 |
 | 本地使用 | SQLite 本地存储，无需配置云端即可记录；关闭主窗口后可驻留托盘 |
 | 安装与升级 | 0.3.0 起支持当前用户安装、卸载，以及「设置 → 关于」检查、下载、校验和安装新版 |
 
@@ -72,6 +73,8 @@ Windows 分发包自带运行环境，无需另装 Python。不要只复制 `Lum
 | 全局快捷记录 | 默认 Ctrl+O，可在「设置 → 快捷键」录制或修改 |
 | 搜索笔记 | Ctrl+F；Esc 清空搜索 |
 | 保存记录 | Enter |
+| 添加图片 | 在输入框或详情栏正文里 Ctrl+V 粘贴截图，或把图片文件拖进去 |
+| 调整分类顺序 | 侧栏按住分类拖到目标位置；或选中后 Alt+↑ / Alt+↓ |
 | 编辑记录 | 双击记录，Enter 保存，Esc 取消 |
 | 快捷记录选择分类 | 输入 `/` 后键入分类名，Tab 补全 |
 | 打开设置 | 侧栏左下角「设置」，选择分区 |
@@ -81,11 +84,12 @@ Windows 分发包自带运行环境，无需另装 Python。不要只复制 `Lum
 
 ## 数据与多设备同步
 
-- 默认数据库：`~/.memo_app/memo.db`；可通过环境变量 `MEMO_APP_DATA_DIR` 指定独立数据目录。
+- 默认数据库：`~/.memo_app/memo.db`，图片保存在同目录的 `images/` 下；可通过环境变量 `MEMO_APP_DATA_DIR` 指定独立数据目录。
 - 备份前先从托盘退出应用，再复制整个数据目录。
 - 同步为可选功能，当前主要面向**多台 Windows 电脑**，不提供手机端应用。
 - 多台电脑需使用相同远程目录和同步库密码；账号与密码通过 Windows 凭据管理器保存。
 - 同步库密码用于解密远端数据，忘记后无法找回。同步会传播编辑和删除，不能代替独立备份。
+- 图片随备忘录一起加密同步（0.5.0 起）；多台电脑都升级后才能互相看到图片。分类的拖动顺序只保存在本机。
 
 完整步骤与故障排查见 [坚果云同步用户指南](docs/jianguoyun-sync-user-guide.md)。协议与实现说明见 [同步协议](docs/jianguoyun-sync-protocol.md)。
 
@@ -134,6 +138,8 @@ src/memo_app/
 ├── theme.py / icons.py    # 主题与图标
 ├── effects.py             # 界面动效
 ├── db.py                  # SQLite 数据层
+├── images.py              # 图片附件：保存、缩略图、剪贴板
+├── detail_pane.py         # 右侧详情栏（任务属性与图片）
 ├── single_instance.py     # 单实例与再次启动激活
 └── sync/                  # WebDAV、加密与同步引擎
 ```

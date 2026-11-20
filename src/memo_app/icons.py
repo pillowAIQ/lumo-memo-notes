@@ -1,16 +1,9 @@
-"""程序化生成应用图标（无需图片资源文件）。"""
+"""轻笺品牌图标与界面线条图标。"""
 from functools import lru_cache
+from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import (
-    QColor,
-    QIcon,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-)
+from PySide6.QtCore import QByteArray, QRectF, QSize, Qt
+from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 
@@ -50,6 +43,7 @@ _PATHS = {
     "flag": '<path d="M5 21V4h11l-2 4 2 4H5"/>',
     "star": '<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9Z"/>',
     "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    "image": '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 3.5 3 3-2.5 4.5 4"/>',
     "panel": '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16"/>',
 }
 
@@ -75,97 +69,11 @@ def ui_icon(name: str, color: str = "#69766E", size: int = 20) -> QIcon:
     return icon
 
 
-BRAND = ("#3F8C6D", "#245845")  # 轻笺 Lumo 品牌松绿：托盘/任务栏图标固定使用
+@lru_cache(maxsize=1)
+def make_icon() -> QIcon:
+    """应用、窗口和托盘共享同一个多尺寸 Windows 图标。"""
+    return QIcon(str(Path(__file__).with_name("assets") / "lumo.ico"))
 
 
-def paint_mark(p: QPainter, size: float, top: str = BRAND[0], bottom: str = BRAND[1]) -> None:
-    """轻笺 · Lumo 标志：圆角方块上一张折角便笺 + 一笔对勾（32 单位网格）。"""
-    p.save()
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.scale(size / 32, size / 32)
-    grad = QLinearGradient(0, 0, 0, 32)
-    grad.setColorAt(0.0, QColor(top))
-    grad.setColorAt(1.0, QColor(bottom))
-    tile = QPainterPath()
-    tile.addRoundedRect(QRectF(0.5, 0.5, 31, 31), 8, 8)
-    p.fillPath(tile, grad)
-    # 顶部一道极淡的高光，避免纯平色块显得廉价
-    gloss = QLinearGradient(0, 0, 0, 16)
-    gloss.setColorAt(0.0, QColor(255, 255, 255, 46))
-    gloss.setColorAt(1.0, QColor(255, 255, 255, 0))
-    p.fillPath(tile, gloss)
-
-    sheet = QPainterPath()
-    sheet.moveTo(11, 7)
-    sheet.lineTo(19.2, 7)
-    sheet.lineTo(24.5, 12.3)
-    sheet.lineTo(24.5, 22.8)
-    sheet.quadTo(24.5, 25.5, 21.8, 25.5)
-    sheet.lineTo(11, 25.5)
-    sheet.quadTo(8.3, 25.5, 8.3, 22.8)
-    sheet.lineTo(8.3, 9.7)
-    sheet.quadTo(8.3, 7, 11, 7)
-    p.fillPath(sheet, QColor(255, 255, 255, 246))
-
-    fold = QPainterPath()
-    fold.moveTo(19.2, 7)
-    fold.lineTo(19.2, 10.6)
-    fold.quadTo(19.2, 12.3, 20.9, 12.3)
-    fold.lineTo(24.5, 12.3)
-    fold.closeSubpath()
-    fold_color = QColor(bottom)
-    fold_color.setAlpha(70)
-    p.fillPath(fold, QColor("#FFFFFF"))
-    p.fillPath(fold, fold_color)
-
-    pen = QPen(QColor(bottom), 2.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    check = QPainterPath()
-    check.moveTo(12.2, 17.2)
-    check.lineTo(15.1, 20.1)
-    check.lineTo(20.8, 14.2)
-    p.drawPath(check)
-    p.restore()
-
-
-def mark_pixmap(size: int, top: str = BRAND[0], bottom: str = BRAND[1], dpr: float = 2.0) -> QPixmap:
-    pm = QPixmap(int(size * dpr), int(size * dpr))
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    paint_mark(p, size * dpr, top, bottom)
-    p.end()
-    pm.setDevicePixelRatio(dpr)
-    return pm
-
-
-def make_icon(size: int = 64) -> QIcon:
-    """应用 / 托盘图标（固定品牌色，多分辨率）。"""
-    icon = QIcon()
-    for px in sorted({16, 20, 24, 32, 48, 64, 128, 256, size}):
-        icon.addPixmap(mark_pixmap(px, dpr=1.0))
-    return icon
-
-
-def write_ico(path, sizes=(16, 24, 32, 48, 64, 128, 256)) -> None:
-    """生成多尺寸 .ico（PNG 内嵌格式，Windows Vista+ 支持），供 PyInstaller 使用。"""
-    import struct
-
-    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
-
-    blobs = []
-    for px in sizes:
-        data = QByteArray()
-        buf = QBuffer(data)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        mark_pixmap(px, dpr=1.0).toImage().save(buf, "PNG")
-        buf.close()
-        blobs.append((px, bytes(data)))
-    header = struct.pack("<HHH", 0, 1, len(blobs))
-    offset = 6 + 16 * len(blobs)
-    entries, payload = b"", b""
-    for px, blob in blobs:
-        dim = 0 if px >= 256 else px
-        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(blob), offset + len(payload))
-        payload += blob
-    with open(path, "wb") as f:
-        f.write(header + entries + payload)
+def mark_pixmap(size: int, dpr: float = 2.0) -> QPixmap:
+    return make_icon().pixmap(QSize(size, size), dpr)

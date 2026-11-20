@@ -38,8 +38,9 @@ GROUP_MAX_ROWS = 6
 _SCROLL_MAX = 420
 _SCROLL_RESERVE = 170
 _SCROLL_MIN = 120
-# 面板距屏幕可用区域边缘的最小留白
-_EDGE = 8
+# 面板允许部分移出屏幕，但至少保留这么多像素在屏幕内，方便再拖回来
+_KEEP_VISIBLE = 72
+_KEEP_VISIBLE_Y = 44  # 标题栏高度：顶部不允许移出屏幕
 
 # 挂件配色随风格：云母 = 深色亚克力（文字浅色），纸笺 = 钉在桌面上的纸条（文字墨色）
 _MICA_COLORS = {
@@ -360,15 +361,18 @@ class TodoWidget(QWidget):
         # 按分类分组：未分类("0")排最后
         cats = {c.id: c for c in db.list_categories()}
         cat_map = db.memo_category_map()
+        cat_rank = {cid: i for i, cid in enumerate(cats)}
 
         def group_key(m: Memo) -> str:
             cids = cat_map.get(m.id, set()) & cats.keys()
-            return str(sorted(cids)[0]) if cids else "0"
+            return str(min(cids, key=lambda c: cat_rank[c])) if cids else "0"
 
         groups: dict[str, list[Memo]] = {}
         for m in todos:
             groups.setdefault(group_key(m), []).append(m)
-        ordered = sorted(groups.keys(), key=lambda k: (k == "0", int(k)))
+        # 分组顺序跟随侧边栏的分类排序（可拖动调整）；未分类排最后
+        rank = {str(cid): i for i, cid in enumerate(cats)}
+        ordered = sorted(groups.keys(), key=lambda k: (k == "0", rank.get(k, len(rank))))
 
         for key in ordered:
             memos = groups[key]
@@ -555,6 +559,9 @@ class TodoWidget(QWidget):
 
     def _relayout(self) -> None:
         """尺寸变化后的统一收口：滚动区限高 → 重排 → 钳回屏幕可用区域。"""
+        # 面板原本完整在屏内（例如默认停在右下角）时，展开变高后仍完整推回屏内；
+        # 用户主动把面板藏了一半到屏幕外时，保持其位置不弹回
+        was_inside = self._fully_on_screen()
         self._update_scroll_bound()
         # 滚动区 sizeHint 依赖内容高度：内容增删后必须让布局系统重算。
         # updateGeometry 只投递 LayoutRequest（异步），这里同步冲刷，
@@ -562,33 +569,57 @@ class TodoWidget(QWidget):
         self.list_scroll.updateGeometry()
         QCoreApplication.sendPostedEvents(self, QEvent.Type.LayoutRequest)
         self.adjustSize()
-        self._clamp_to_screen()
+        self._clamp_to_screen(strict=was_inside)
+
+    def _current_screen(self):
+        """面板当前所在屏幕：优先中心点所在屏，其次与面板相交面积最大的屏。
+
+        面板允许部分移出屏幕，左上角可能落在屏幕外，不能只看 pos()。
+        """
+        frame = self.frameGeometry()
+        screen = QGuiApplication.screenAt(frame.center())
+        if screen is not None:
+            return screen
+        best, best_area = None, 0
+        for s in QGuiApplication.screens():
+            inter = s.availableGeometry().intersected(frame)
+            area = inter.width() * inter.height()
+            if area > best_area:
+                best, best_area = s, area
+        return best or QGuiApplication.primaryScreen()
 
     def _update_scroll_bound(self) -> None:
         """按当前所在屏幕的可用高度限制列表滚动区，保证面板不超出屏幕。"""
-        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        screen = self._current_screen()
         if screen is None:
             return
         bound = min(_SCROLL_MAX, screen.availableGeometry().height() - _SCROLL_RESERVE)
         self.list_scroll.setMaximumHeight(max(_SCROLL_MIN, bound))
 
-    def _clamp_to_screen(self) -> None:
-        """把面板矩形钳回所在屏幕的可用区域内（拖动/展开/还原后调用）。"""
-        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+    def _fully_on_screen(self) -> bool:
+        screen = self._current_screen()
+        if screen is None:
+            return True
+        return screen.availableGeometry().contains(self.frameGeometry())
+
+    def _clamp_to_screen(self, strict: bool = False) -> None:
+        """保证面板仍可被抓回来：允许左/右/下方部分移出屏幕（"贴边藏一半"），
+        但至少保留 _KEEP_VISIBLE 像素宽、标题栏高度在屏幕内，且顶部不越出屏幕上沿。
+
+        strict=True 时完整钳回可用区域（面板原本就完整可见、只是因展开而变高）。"""
+        screen = self._current_screen()
         if screen is None:
             return
         geo = screen.availableGeometry()
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return
-        if w + 2 * _EDGE <= geo.width():
-            x = min(max(self.x(), geo.left() + _EDGE), geo.right() - w - _EDGE)
-        else:
-            x = geo.left()
-        if h + 2 * _EDGE <= geo.height():
-            y = min(max(self.y(), geo.top() + _EDGE), geo.bottom() - h - _EDGE)
-        else:
-            y = geo.top()
+        keep_x = w if strict else min(_KEEP_VISIBLE, w)
+        keep_y = h if strict else min(_KEEP_VISIBLE_Y, h)
+        if strict and (w > geo.width() or h > geo.height()):
+            keep_x, keep_y = min(w, geo.width()), min(h, geo.height())
+        x = min(max(self.x(), geo.left() - w + keep_x), geo.right() + 1 - keep_x)
+        y = min(max(self.y(), geo.top()), geo.bottom() + 1 - keep_y)
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
 
@@ -640,7 +671,7 @@ class TodoWidget(QWidget):
         if e.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
             self._press_pos = None
             self._dragging = False
-            # 拖到屏幕边缘附近松手：钳回可用区域，避免面板被拖出可视范围
+            # 松手后只做最低限度的收口：可以藏一半在屏幕外，但不会整个丢失
             self._clamp_to_screen()
         super().mouseReleaseEvent(e)
 

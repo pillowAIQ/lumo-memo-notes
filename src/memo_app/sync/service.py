@@ -474,7 +474,7 @@ class SyncService(QObject):
                     f"应用 {s.get('applied_ops', 0)} 条 / "
                     f"发布 {s.get('published', 0)} 批）{suffix}"
                 )
-                if s.get("applied_ops", 0) > 0 or copies > 0:
+                if s.get("applied_ops", 0) > 0 or copies > 0 or s.get("blobs_down", 0) > 0:
                     # 远端数据/冲突副本落库后通知 UI 刷新
                     # （编辑缓冲由 reload 保护）
                     self.synced.emit()

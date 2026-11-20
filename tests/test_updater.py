@@ -18,8 +18,8 @@ from PySide6.QtWidgets import QApplication
 from memo_app import updater as u
 
 app = QApplication.instance() or QApplication([])
-CURRENT_VERSION = "0.3.0"
-UPDATE_VERSION = "0.4.0"
+CURRENT_VERSION = "0.4.0"
+UPDATE_VERSION = "0.5.0"
 
 
 def metadata(version=UPDATE_VERSION, payload=b"installer"):

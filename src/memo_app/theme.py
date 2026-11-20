@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor
 
 APP_NAME = "轻笺"
 APP_NAME_EN = "Lumo"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 _ASSETS = Path(__file__).parent / "assets"
 _CHECK = (_ASSETS / "check.png").as_posix()

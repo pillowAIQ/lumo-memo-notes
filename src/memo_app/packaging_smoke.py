@@ -13,7 +13,7 @@ def verify(report_path):
         with tempfile.TemporaryDirectory(prefix="memo-package-") as temporary:
             os.environ["MEMO_APP_DATA_DIR"] = temporary
             import ssl
-            from PySide6.QtCore import QSettings, QCoreApplication, QEvent
+            from PySide6.QtCore import QSettings, QCoreApplication, QEvent, QSize
             from PySide6.QtGui import QImage, QPainter
             from PySide6.QtSvg import QSvgRenderer
             from PySide6.QtWidgets import QApplication, QSystemTrayIcon
@@ -43,6 +43,19 @@ def verify(report_path):
                 import winsound  # Verify bundled backend without playing audio.
                 assert callable(winsound.MessageBeep)
             report["checks"].append("Persistent reminders and Windows sound backend")
+            from PySide6.QtGui import QImageReader
+            formats = {bytes(f).decode() for f in QImageReader.supportedImageFormats()}
+            assert {"png", "jpg", "jpeg", "gif", "webp"} <= formats, formats
+            from . import images
+            photo = QImage(64, 48, QImage.Format.Format_RGB32)
+            photo.fill(0x3366AA)
+            jpg_path = Path(temporary) / "photo.jpg"
+            assert photo.save(str(jpg_path), "JPG")
+            img_memo = db.add_memo("packaged image check")
+            assert images.attach_files(img_memo, [str(jpg_path)]) == 1
+            assert not images.thumbnail(db.list_memo_images(img_memo)[0][1], 90).isNull()
+            db.purge(img_memo)
+            report["checks"].append("Image attachments (PNG/JPEG/GIF/WebP)")
             from .sync import crypto, credentials
             mk = crypto.generate_master_key()
             sealed = crypto.seal_vault(mk, "temporary-package-password")
@@ -86,8 +99,17 @@ def verify(report_path):
                     assert not picker._busy and picker.list.count() == 1
                     picker.list.setCurrentRow(0)
                     assert picker.result_dir() == "test-folder"
-                    tray = QSystemTrayIcon(make_icon(22), win)
-                    assert not tray.icon().isNull()
+                    tray = QSystemTrayIcon(make_icon(), win)
+                    tray_icon = tray.icon()
+                    sizes = tray_icon.availableSizes()
+                    for size in (16, 32, 256):
+                        extent = QSize(size, size)
+                        assert extent in sizes
+                        frame = tray_icon.pixmap(extent, 1.0).toImage()
+                        assert all(frame.pixelColor(x, y).alpha() == 0 for x, y in (
+                            (0, 0), (0, size - 1), (size - 1, 0), (size - 1, size - 1),
+                        ))
+                        assert frame.pixelColor(size // 2, size // 2).alpha() == 255
                     renderer = QSvgRenderer(b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="green"/></svg>')
                     assert renderer.isValid()
                     image = QImage(16, 16, QImage.Format.Format_ARGB32)

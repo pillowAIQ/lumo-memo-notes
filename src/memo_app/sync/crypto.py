@@ -150,6 +150,11 @@ def head_aad(vault_id: str, writer_id: str) -> bytes:
     return f"memo-head:{PROTOCOL_VERSION}:{vault_id}:{writer_id}".encode("utf-8")
 
 
+def blob_aad(vault_id: str, name: str) -> bytes:
+    """图片 blob：绑定 vault 与文件名，防止跨 vault / 换名重放。"""
+    return f"memo-blob:{PROTOCOL_VERSION}:{vault_id}:{name}".encode("utf-8")
+
+
 def encrypt_json(key: bytes, obj: dict, aad: bytes) -> bytes:
     return aes_gcm_encrypt(
         key, json.dumps(obj, ensure_ascii=False).encode("utf-8"), aad

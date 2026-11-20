@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS sync_peer_state (
     head_seq INTEGER NOT NULL DEFAULT 0,
     applied_seq INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS sync_blobs (
+    name TEXT PRIMARY KEY,
+    uploaded INTEGER NOT NULL DEFAULT 0,
+    last_miss REAL NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS sync_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     writer_id TEXT NOT NULL,
@@ -274,6 +279,10 @@ def enqueue_memo(conn: sqlite3.Connection, memo_id: int) -> None:
         "remind_advance": row["remind_advance"],
         "category_uuids": cats,
     }
+    imgs = memo_image_names(conn, memo_id)
+    if imgs is not None:
+        # 图片按内容哈希命名；本体由 engine 单独加密上传到 blobs/
+        payload["images"] = imgs
     # 本地写入后旧 pending 失效：最新 category_uuids 以本 op 为准，
     # 避免远端分类晚到时按过期引用回填
     drop_pending_links_for_memo(conn, row["uuid"])
@@ -284,6 +293,68 @@ def enqueue_memo(conn: sqlite3.Connection, memo_id: int) -> None:
         op="upsert",
         payload=payload,
     )
+
+
+def memo_image_names(conn: sqlite3.Connection, memo_id: int) -> list[str] | None:
+    """备忘录图片文件名列表（按添加顺序）；图片表不存在时返回 None。"""
+    try:
+        rows = conn.execute(
+            "SELECT filename FROM memo_images WHERE memo_id = ? ORDER BY id", (memo_id,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    return [r["filename"] for r in rows]
+
+
+# ---------- 图片 blob 上传 / 下载状态（engine 用） ----------
+
+
+def blobs_to_upload(conn: sqlite3.Connection, limit: int) -> list[str]:
+    """本机有引用、尚未确认在远端的图片文件名。"""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT mi.filename AS name FROM memo_images mi"
+            " LEFT JOIN sync_blobs b ON b.name = mi.filename"
+            " WHERE b.uploaded IS NULL OR b.uploaded = 0"
+            " ORDER BY mi.id LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [r["name"] for r in rows]
+
+
+def mark_blob_uploaded(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute(
+        "INSERT INTO sync_blobs(name, uploaded, last_miss) VALUES (?, 1, 0)"
+        " ON CONFLICT(name) DO UPDATE SET uploaded = 1, last_miss = 0",
+        (name,),
+    )
+
+
+def mark_blob_missing(conn: sqlite3.Connection, name: str, when: float) -> None:
+    conn.execute(
+        "INSERT INTO sync_blobs(name, uploaded, last_miss) VALUES (?, 0, ?)"
+        " ON CONFLICT(name) DO UPDATE SET last_miss = excluded.last_miss",
+        (name, when),
+    )
+
+
+def blob_last_miss(conn: sqlite3.Connection, name: str) -> float:
+    row = conn.execute(
+        "SELECT last_miss FROM sync_blobs WHERE name = ?", (name,)
+    ).fetchone()
+    return float(row["last_miss"]) if row is not None else 0.0
+
+
+def referenced_blob_names(conn: sqlite3.Connection) -> list[str]:
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT filename FROM memo_images ORDER BY id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [r["filename"] for r in rows]
 
 
 def enqueue_memo_delete(conn: sqlite3.Connection, memo_uuid: str) -> None:

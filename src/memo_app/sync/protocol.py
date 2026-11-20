@@ -4,6 +4,7 @@
     memo-sync/<vault_id>/vault.json
     memo-sync/<vault_id>/heads/<writer_id>.enc
     memo-sync/<vault_id>/commits/<writer_id>/<seq>.enc
+    memo-sync/<vault_id>/blobs/<sha256>.<png|jpg>.enc   图片本体（内容寻址，只增不改）
 
 批次信封（加密前的 JSON）：
     {"v":1,"batch_id","writer_id","seq","created_utc","ops":[...]}
@@ -26,6 +27,9 @@ REMOTE_ROOT = "memo-sync"
 VAULT_FILE = "vault.json"
 HEADS_DIR = "heads"
 COMMITS_DIR = "commits"
+BLOBS_DIR = "blobs"
+_BLOB_NAME_RE = re.compile(r"^[0-9a-f]{64}\.(png|jpg)$")
+MAX_IMAGES_PER_MEMO = 200
 
 MAX_OPS_PER_BATCH = 500
 MAX_BATCH_PLAINTEXT = 4 * 1024 * 1024  # 加密前 JSON 上限
@@ -89,6 +93,17 @@ def commit_path(vault_id: str, writer_id: str, seq: int) -> str:
     if not _is_int(seq) or seq < 1:
         raise ProtocolError("invalid commit seq")
     return f"{vault_id_path(vault_id)}/{COMMITS_DIR}/{writer_id}/{seq}.enc"
+
+
+def is_blob_name(name: object) -> bool:
+    return isinstance(name, str) and bool(_BLOB_NAME_RE.match(name))
+
+
+def blob_rel(name: str) -> str:
+    """blob 相对 vault 根的路径。"""
+    if not is_blob_name(name):
+        raise ProtocolError("invalid blob name")
+    return f"{BLOBS_DIR}/{name}.enc"
 
 
 def utc_now_iso() -> str:

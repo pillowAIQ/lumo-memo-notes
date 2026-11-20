@@ -370,7 +370,7 @@ class Controller(QObject):
     # ---------- 托盘 ----------
 
     def _build_tray(self) -> None:
-        self.tray = QSystemTrayIcon(make_icon(22), self)
+        self.tray = QSystemTrayIcon(make_icon(), self)
         self.tray.setToolTip(f"{theme.APP_NAME} · {theme.APP_NAME_EN}")
 
         menu = QMenu()

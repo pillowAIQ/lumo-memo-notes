@@ -8,17 +8,21 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 
-from PySide6.QtCore import QDateTime, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QTextOption
+from PySide6.QtCore import QDateTime, QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QTextOption
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDateTimeEdit,
+    QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QToolButton,
@@ -26,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import db, theme
+from . import db, images, theme
 from .db import Memo
 from .icons import ui_icon
 
@@ -55,11 +59,128 @@ def _stamp(iso: str) -> str:
     return f"{dt.year}年{dt.month}月{dt.day}日"
 
 
+THUMB = 90
+THUMB_COLS = 3
+
+
+class ImageThumb(QWidget):
+    """详情栏里的图片缩略图：单击用系统看图打开，悬停出现删除，右键更多操作。"""
+
+    open_requested = Signal(str)
+    delete_requested = Signal(int)
+    copy_requested = Signal(str)
+
+    def __init__(self, image_id: int, filename: str) -> None:
+        super().__init__()
+        self.image_id = image_id
+        self.filename = filename
+        self._hover = False
+        self.setFixedSize(THUMB, THUMB)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("图片附件，回车查看，Delete 删除")
+        self.setToolTip("单击查看 · 右键更多")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def _del_rect(self) -> QRectF:
+        return QRectF(self.width() - 24, 4, 20, 20)
+
+    def paintEvent(self, e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = 4 if theme.is_paper() else 8
+        path = QPainterPath()
+        path.addRoundedRect(r, radius, radius)
+        pm = images.thumbnail(self.filename, THUMB, self.devicePixelRatioF())
+        p.save()
+        p.setClipPath(path)
+        if pm.isNull():
+            p.fillPath(path, theme.qc("surface_alt"))
+            p.setPen(theme.qc("faint"))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "等待同步")
+        else:
+            p.drawPixmap(self.rect(), pm)
+        p.restore()
+        focus = self.hasFocus()
+        token = "focus" if focus else ("border_hover" if self._hover else "line")
+        p.setPen(QPen(theme.qc(token), 1.5 if focus else 1.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        if self._hover or focus:
+            d = self._del_rect()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 140))
+            p.drawEllipse(d)
+            p.setPen(QPen(QColor("#FFFFFF"), 1.6))
+            c = d.center()
+            k = 4.0
+            p.drawLine(QPointF(c.x() - k, c.y() - k), QPointF(c.x() + k, c.y() + k))
+            p.drawLine(QPointF(c.x() - k, c.y() + k), QPointF(c.x() + k, c.y() - k))
+        p.end()
+
+    def event(self, e):  # noqa: N802
+        if e.type() in (QEvent.Type.HoverEnter, QEvent.Type.HoverLeave):
+            self._hover = e.type() == QEvent.Type.HoverEnter
+            self.update()
+        return super().event(e)
+
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            if self._del_rect().contains(e.position()):
+                self.delete_requested.emit(self.image_id)
+            else:
+                self.open_requested.emit(self.filename)
+            return
+        super().mouseReleaseEvent(e)
+
+    def keyPressEvent(self, e):  # noqa: N802
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.open_requested.emit(self.filename)
+            return
+        if e.key() == Qt.Key.Key_Delete:
+            self.delete_requested.emit(self.image_id)
+            return
+        super().keyPressEvent(e)
+
+    def focusInEvent(self, e):  # noqa: N802
+        self.update()
+        super().focusInEvent(e)
+
+    def focusOutEvent(self, e):  # noqa: N802
+        self.update()
+        super().focusOutEvent(e)
+
+    def contextMenuEvent(self, e):  # noqa: N802
+        menu = QMenu(self)
+        a_open = menu.addAction("查看")
+        a_copy = menu.addAction("复制图片")
+        menu.addSeparator()
+        a_del = menu.addAction("删除图片")
+        act = menu.exec(e.globalPos())
+        if act is a_open:
+            self.open_requested.emit(self.filename)
+        elif act is a_copy:
+            self.copy_requested.emit(self.filename)
+        elif act is a_del:
+            self.delete_requested.emit(self.image_id)
+
+
 class _TitleEdit(QPlainTextEdit):
-    """正文编辑：随内容增高；Enter 保存，Shift+Enter 换行，Esc 放弃。"""
+    """正文编辑：随内容增高；Enter 保存，Shift+Enter 换行，Esc 放弃。
+
+    粘贴 / 拖入图片时不插入文本，而是作为图片附件交给详情栏。"""
 
     commit = Signal()
     revert = Signal()
+    images_pasted = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
@@ -82,6 +203,16 @@ class _TitleEdit(QPlainTextEdit):
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         self._fit()
+
+    def canInsertFromMimeData(self, source):  # noqa: N802
+        return images.mime_has_image(source) or super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):  # noqa: N802
+        imgs = images.images_from_mime(source)
+        if imgs:
+            self.images_pasted.emit(imgs)
+            return
+        super().insertFromMimeData(source)
 
     def keyPressEvent(self, e):  # noqa: N802
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
@@ -176,6 +307,7 @@ class DetailPane(QWidget):
         self.title = _TitleEdit()
         self.title.commit.connect(self._save_text)
         self.title.revert.connect(self._revert_text)
+        self.title.images_pasted.connect(self._attach_images)
         title_row.addWidget(self.title, 1)
         lay.addLayout(title_row)
         lay.addSpacing(18)
@@ -279,6 +411,46 @@ class DetailPane(QWidget):
         grid.addWidget(cat_host, 4, 1)
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
+        lay.addSpacing(16)
+
+        # ---- 图片附件 ----
+        img_head = QHBoxLayout()
+        img_head.setSpacing(8)
+        self.img_icon = QLabel()
+        img_head.addWidget(self.img_icon)
+        img_title = QLabel("图片")
+        img_title.setObjectName("fieldLabel")
+        img_head.addWidget(img_title)
+        self.img_count = QLabel()
+        self.img_count.setObjectName("statusLabel")
+        img_head.addWidget(self.img_count)
+        img_head.addStretch(1)
+        self.img_add = QPushButton("添加图片")
+        self.img_add.setObjectName("chipGhost")
+        self.img_add.setToolTip("从文件添加图片；也可以在正文里直接粘贴截图，或把图片拖进详情栏")
+        self.img_add.clicked.connect(self._pick_images)
+        img_head.addWidget(self.img_add)
+        lay.addLayout(img_head)
+        lay.addSpacing(8)
+        self.img_hint = QLabel("粘贴截图 (Ctrl+V) 或拖入图片，和文字记在一起")
+        self.img_hint.setObjectName("statusLabel")
+        self.img_hint.setWordWrap(True)
+        lay.addWidget(self.img_hint)
+        self.img_scroll = QScrollArea()
+        self.img_scroll.setObjectName("imageScroll")
+        self.img_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.img_scroll.setWidgetResizable(True)
+        self.img_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.img_host = QWidget()
+        self.img_host.setObjectName("imageHost")
+        self.img_grid = QGridLayout(self.img_host)
+        self.img_grid.setContentsMargins(0, 0, 0, 0)
+        self.img_grid.setSpacing(8)
+        self.img_grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.img_scroll.setWidget(self.img_host)
+        lay.addWidget(self.img_scroll)
+        self._img_sig: tuple | None = None
+        self.setAcceptDrops(True)
         lay.addStretch(1)
 
         line = QWidget()
@@ -305,7 +477,7 @@ class DetailPane(QWidget):
         self.stack.addWidget(page)
         self.page = page
 
-        for b in (self.due_add, self.due_clear, self.cat_btn, self.pin_btn, self.del_btn,
+        for b in (self.due_add, self.due_clear, self.cat_btn, self.pin_btn, self.del_btn, self.img_add,
                   self.done_btn, self.close_btn, *self.prio_group.buttons()):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
         self.retheme()
@@ -320,6 +492,8 @@ class DetailPane(QWidget):
         self.close_btn.setIcon(ui_icon("close", muted, 13))
         self.due_clear.setIcon(ui_icon("close", muted, 12))
         self.empty_icon.setPixmap(ui_icon("note", theme.c("faint"), 34).pixmap(34, 34))
+        self.img_icon.setPixmap(ui_icon("image", muted, 15).pixmap(15, 15))
+        self._img_sig = None  # 主题变化：缩略图边框随之重绘
         self.close_btn.setVisible(theme.is_paper())
         if self.memo is not None:
             self._fill(self.memo, keep_text=self.title.hasFocus())
@@ -389,10 +563,109 @@ class DetailPane(QWidget):
             self.crumb.setText(names or f'<span style="color:{theme.c("muted")}">未分类</span>')
             self.pin_btn.setChecked(m.is_pinned)
             self.pin_btn.setText("已置顶" if m.is_pinned else "置顶")
+            self._fill_images(m.id)
             created, updated = _stamp(m.created_at), _stamp(m.updated_at)
             self.stamp.setText(f"创建于 {created}" + (f" · 修改于 {updated}" if updated != created else ""))
         finally:
             self._loading = False
+
+    # ---------- 图片 ----------
+
+    def _fill_images(self, memo_id: int) -> None:
+        rows = db.list_memo_images(memo_id)
+        # 文件是否在本机也算进签名：同步下载完成后缩略图要从"未下载"刷新为图片
+        sig = (memo_id, tuple(rows), tuple(db.image_path(f).exists() for _, f in rows))
+        if sig == self._img_sig:
+            return
+        self._img_sig = sig
+        while self.img_grid.count():
+            w = self.img_grid.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        for i, (image_id, filename) in enumerate(rows):
+            t = ImageThumb(image_id, filename)
+            t.open_requested.connect(self._open_image)
+            t.copy_requested.connect(self._copy_image)
+            t.delete_requested.connect(self._delete_image)
+            self.img_grid.addWidget(t, i // THUMB_COLS, i % THUMB_COLS)
+        n = len(rows)
+        self.img_count.setText(str(n) if n else "")
+        self.img_hint.setVisible(n == 0)
+        self.img_scroll.setVisible(n > 0)
+        lines = (n + THUMB_COLS - 1) // THUMB_COLS
+        shown = min(lines, 2)  # 超过两行在内部滚动，不把详情栏撑出窗口
+        self.img_scroll.setFixedHeight(max(0, shown * THUMB + max(0, shown - 1) * 8))
+        self.img_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if lines > 2 else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+    def _attach_images(self, imgs: list) -> None:
+        if self.memo is None or not imgs:
+            return
+        memo_id = self.memo.id
+        added = sum(1 for img in imgs if images.attach_image(memo_id, img))
+        self._after_images_changed(memo_id, f"已添加 {added} 张图片" if added else "无法保存图片")
+
+    def _pick_images(self) -> None:
+        if self.memo is None:
+            return
+        memo_id = self.memo.id
+        paths, _ = QFileDialog.getOpenFileNames(self, "添加图片", "", images.FILE_FILTER)
+        if not paths:
+            return
+        added = images.attach_files(memo_id, paths)
+        self._after_images_changed(memo_id, f"已添加 {added} 张图片" if added else "无法读取所选图片")
+
+    def _after_images_changed(self, memo_id: int, toast: str | None) -> None:
+        if self.memo is not None and self.memo.id == memo_id:
+            self._img_sig = None
+            self._fill_images(memo_id)
+        # 写库后刷新列表（卡片上的图片数）；推迟一轮，避免在信号处理中重建列表
+        win = self.win
+        QTimer.singleShot(0, win, win.reload)
+        if toast:
+            QTimer.singleShot(0, win, lambda: win._notify(toast, "image"))
+
+    def _open_image(self, filename: str) -> None:
+        if not images.open_external(filename):
+            self.win._notify("无法打开图片", "info")
+
+    def _copy_image(self, filename: str) -> None:
+        if images.copy_to_clipboard(filename):
+            self.win._notify("图片已复制", "copy")
+
+    def _delete_image(self, image_id: int) -> None:
+        if self.memo is None:
+            return
+        memo_id = self.memo.id
+
+        def run() -> None:
+            db.delete_memo_image(image_id)
+            self._after_images_changed(memo_id, "图片已删除")
+
+        # 推迟：当前正处于缩略图自身的事件处理中，重建会销毁它
+        QTimer.singleShot(0, self, run)
+
+    def dragEnterEvent(self, e):  # noqa: N802
+        if self.memo is not None and images.mime_has_image(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):  # noqa: N802
+        if self.memo is not None and images.mime_has_image(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):  # noqa: N802
+        imgs = images.images_from_mime(e.mimeData()) if self.memo is not None else []
+        if imgs:
+            e.acceptProposedAction()
+            QTimer.singleShot(0, self, lambda: self._attach_images(imgs))
+        else:
+            super().dropEvent(e)
 
     def _cat_html(self, memo_id: int) -> str:
         ids = sorted(self.win._memo_cats.get(memo_id, set()))

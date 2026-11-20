@@ -230,12 +230,21 @@ def _child_main() -> int:
               0 <= pos.y() and pos.y() + last.height() <= vp.height() + 2,
               f"y={pos.y()} row_h={last.height()} vp_h={vp.height()}")
 
-        # ---- 9. 拖到屏幕边缘后 reload：面板仍在可用区内 ----
+        # ---- 9. 允许一半藏到屏幕外：reload 后不弹回 ----
         geo = QGuiApplication.primaryScreen().availableGeometry()
-        w.move(geo.right() - w.width() + 30, geo.bottom() - w.height() + 50)
+        target = (geo.right() - w.width() // 2, geo.bottom() - w.height() + 50)
+        w.move(*target)
+        w._clamp_to_screen()
         w.reload()
         settle(60)
-        check("拖到边缘后面板仍在屏内", inside_geo(w), f"{w.geometry()} vs {geo}")
+        check("藏一半到屏幕外不弹回", (w.x(), w.y()) == target, f"{w.pos()} vs {target}")
+
+        # ---- 10. 整个拖出屏幕：拉回到至少露出一截，且顶部不越出屏幕 ----
+        w.move(geo.right() + 400, geo.top() - 200)
+        w._clamp_to_screen()
+        visible = w.geometry().intersected(geo)
+        check("拖出屏幕后仍露出一截", visible.width() >= 60 and w.y() >= geo.top(),
+              f"{w.geometry()} vs {geo}")
 
         w.close()
         settle(40)

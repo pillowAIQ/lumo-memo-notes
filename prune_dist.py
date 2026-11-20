@@ -4,7 +4,9 @@ import json
 import sys
 
 QT_MODULES = {"Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll"}
-QT_PLUGINS = {"qwindows.dll", "qmodernwindowsstyle.dll", "qwindowsvistastyle.dll", "qsvg.dll", "qsvgicon.dll"}
+QT_PLUGINS = {"qwindows.dll", "qmodernwindowsstyle.dll", "qwindowsvistastyle.dll", "qsvg.dll", "qsvgicon.dll", "qico.dll",
+              # 图片附件：照片 / 动图 / WebP 解码
+              "qjpeg.dll", "qgif.dll", "qwebp.dll"}
 
 
 def keep_binary(destination):
